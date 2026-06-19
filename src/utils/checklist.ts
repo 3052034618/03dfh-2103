@@ -1,8 +1,12 @@
-import type { ChecklistTask, InquiryData, Script, TaskRole } from '@/types'
+import type { ChecklistTask, InquiryData, Script, OrderStatus, ChecklistData, QuotationData } from '@/types'
 
 export function parseTimeToMinutes(timeStr: string): number {
-  const [h, m] = timeStr.split(':').map(Number)
-  return h * 60 + m
+  const clean = timeStr.replace('次日 ', '').trim()
+  const isNextDay = timeStr.includes('次日')
+  const [h, m] = clean.split(':').map(Number)
+  let minutes = h * 60 + m
+  if (isNextDay) minutes += 24 * 60
+  return minutes
 }
 
 export function minutesToTimeDisplay(totalMinutes: number): { display: string; isNextDay: boolean } {
@@ -128,4 +132,62 @@ export function generateChecklistTasks(
   })
 
   return tasks
+}
+
+export function computeOrderStatus(checklist?: ChecklistData, quotation?: QuotationData): OrderStatus {
+  if (!checklist || !quotation || !quotation.confirmed) return 'not_started'
+  const tasks = checklist.tasks
+  if (tasks.length === 0) return 'not_started'
+
+  const doneCount = tasks.filter(t => t.status === 'done').length
+  const totalCount = tasks.length
+
+  if (doneCount === totalCount) {
+    if (!quotation.finalPaid) return 'wrapping_up'
+    return 'completed'
+  }
+
+  const inProgressCount = tasks.filter(t => t.status === 'in_progress').length
+  if (doneCount > 0 || inProgressCount > 0) return 'in_progress'
+  return 'not_started'
+}
+
+export function getNextPendingTask(checklist?: ChecklistData): ChecklistTask | undefined {
+  if (!checklist || checklist.tasks.length === 0) return undefined
+  return checklist.tasks.find(t => t.status !== 'done')
+}
+
+export function shiftChecklistTime(
+  tasks: ChecklistTask[],
+  oldBaseMinutes: number,
+  newBaseMinutes: number,
+  preserveEdited: boolean = true
+): ChecklistTask[] {
+  const delta = newBaseMinutes - oldBaseMinutes
+
+  return tasks.map((task) => {
+    if (preserveEdited && task.isCustomEdited) {
+      const oldTaskMinutes = parseTimeToMinutes(task.time)
+      const newMinutes = oldTaskMinutes + delta
+      return {
+        ...task,
+        time: minutesToTimeDisplay(newMinutes).display,
+      }
+    } else {
+      const oldTaskMinutes = parseTimeToMinutes(task.time)
+      const newMinutes = oldTaskMinutes + delta
+      return {
+        ...task,
+        time: minutesToTimeDisplay(newMinutes).display,
+      }
+    }
+  })
+}
+
+export function hasCustomEdited(tasks: ChecklistTask[]): boolean {
+  return tasks.some(t => t.isCustomEdited)
+}
+
+export function sortTasksByTime(tasks: ChecklistTask[]): ChecklistTask[] {
+  return [...tasks].sort((a, b) => parseTimeToMinutes(a.time) - parseTimeToMinutes(b.time))
 }

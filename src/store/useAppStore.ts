@@ -1,7 +1,17 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { InquiryData, QuotationData, ChecklistData, Script, ChecklistTask, RoomType, TaskRole } from '@/types'
+import type {
+  InquiryData,
+  QuotationData,
+  ChecklistData,
+  Script,
+  ChecklistTask,
+  RoomType,
+  TaskRole,
+  PaymentMethod,
+} from '@/types'
 import { MOCK_SCRIPTS, STORE_CONFIG } from '@/data/scripts'
+import { parseTimeToMinutes } from '@/utils/checklist'
 
 interface AppState {
   inquiries: InquiryData[]
@@ -18,7 +28,8 @@ interface AppState {
 
   addQuotation: (quotation: QuotationData) => void
   updateQuotation: (id: string, data: Partial<QuotationData>) => void
-  confirmQuotation: (id: string) => void
+  confirmQuotation: (id: string, depositAmount?: number, depositMethod?: PaymentMethod) => void
+  markFinalPaid: (id: string, method: PaymentMethod) => void
   setCurrentQuotationId: (id: string | null) => void
 
   addChecklist: (checklist: ChecklistData) => void
@@ -27,6 +38,7 @@ interface AppState {
   addTask: (checklistId: string, task: Omit<ChecklistTask, 'id'>) => void
   deleteTask: (checklistId: string, taskId: string) => void
   reorderTasks: (checklistId: string, taskIds: string[]) => void
+  replaceAllTasks: (checklistId: string, tasks: ChecklistTask[]) => void
   setCurrentChecklistId: (id: string | null) => void
 
   getAvailableScripts: (guestCount: number, ageGroup: string, roomType?: string) => Script[]
@@ -78,10 +90,30 @@ export const useAppStore = create<AppState>()(
           ),
         })),
 
-      confirmQuotation: (id) =>
+      confirmQuotation: (id, depositAmount = 0, depositMethod = '') =>
         set((state) => ({
           quotations: state.quotations.map((q) =>
-            q.id === id ? { ...q, confirmed: true } : q
+            q.id === id
+              ? {
+                  ...q,
+                  confirmed: true,
+                  depositAmount,
+                  depositMethod: depositMethod as PaymentMethod | '',
+                }
+              : q
+          ),
+        })),
+
+      markFinalPaid: (id, method) =>
+        set((state) => ({
+          quotations: state.quotations.map((q) =>
+            q.id === id
+              ? {
+                  ...q,
+                  finalPaid: true,
+                  finalPaymentMethod: method,
+                }
+              : q
           ),
         })),
 
@@ -114,7 +146,7 @@ export const useAppStore = create<AppState>()(
               ? {
                   ...c,
                   tasks: c.tasks.map((t) =>
-                    t.id === taskId ? { ...t, ...data } : t
+                    t.id === taskId ? { ...t, ...data, isCustomEdited: true } : t
                   ),
                 }
               : c
@@ -123,12 +155,12 @@ export const useAppStore = create<AppState>()(
 
       addTask: (checklistId, task) => {
         const id = Date.now().toString(36) + Math.random().toString(36).slice(2)
-        const newTask = { ...task, id }
+        const newTask: ChecklistTask = { ...task, id, isCustomEdited: true }
         set((state) => ({
           checklists: state.checklists.map((c) => {
             if (c.id !== checklistId) return c
             const allTasks = [...c.tasks, newTask]
-            allTasks.sort((a, b) => a.time.localeCompare(b.time))
+            allTasks.sort((a, b) => parseTimeToMinutes(a.time) - parseTimeToMinutes(b.time))
             return { ...c, tasks: allTasks }
           }),
         }))
@@ -153,6 +185,13 @@ export const useAppStore = create<AppState>()(
             const remaining = c.tasks.filter((t) => !taskIds.includes(t.id))
             return { ...c, tasks: [...ordered, ...remaining] }
           }),
+        })),
+
+      replaceAllTasks: (checklistId, tasks) =>
+        set((state) => ({
+          checklists: state.checklists.map((c) =>
+            c.id === checklistId ? { ...c, tasks } : c
+          ),
         })),
 
       setCurrentChecklistId: (id) => set({ currentChecklistId: id }),

@@ -5,6 +5,9 @@ export type Difficulty = 'easy' | 'medium' | 'hard'
 export type ItemCategory = 'base' | 'decoration' | 'cake' | 'alcohol' | 'overtime' | 'dm' | 'other'
 export type TaskRole = 'front_desk' | 'dm' | 'logistics'
 export type TaskStatus = 'pending' | 'in_progress' | 'done'
+export type PaymentMethod = 'cash' | 'wechat' | 'alipay' | 'card' | 'bank'
+export type PaymentStatus = 'unpaid' | 'partial' | 'paid'
+export type OrderStatus = 'not_started' | 'in_progress' | 'completed' | 'wrapping_up'
 
 export interface Script {
   id: string
@@ -55,6 +58,10 @@ export interface QuotationData {
   discount: number
   totalPrice: number
   confirmed: boolean
+  depositAmount: number
+  depositMethod: PaymentMethod | ''
+  finalPaid: boolean
+  finalPaymentMethod: PaymentMethod | ''
   createdAt: string
 }
 
@@ -65,6 +72,7 @@ export interface ChecklistTask {
   assignee: string
   role: TaskRole
   status: TaskStatus
+  isCustomEdited?: boolean
 }
 
 export interface ChecklistData {
@@ -73,6 +81,7 @@ export interface ChecklistData {
   inquiryId: string
   tasks: ChecklistTask[]
   createdAt: string
+  lastShiftMinutes?: number
 }
 
 export interface StoreConfig {
@@ -122,4 +131,26 @@ export const ROLE_COLORS: Record<TaskRole, string> = {
   front_desk: 'bg-blue-500',
   dm: 'bg-amber-500',
   logistics: 'bg-emerald-500',
+}
+
+export const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
+  cash: '现金',
+  wechat: '微信',
+  alipay: '支付宝',
+  card: '刷卡',
+  bank: '银行转账',
+}
+
+export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
+  not_started: '未开始',
+  in_progress: '进行中',
+  completed: '已完成',
+  wrapping_up: '待收尾',
+}
+
+export const ORDER_STATUS_COLORS: Record<OrderStatus, { bg: string; text: string; border: string }> = {
+  not_started: { bg: 'bg-slate-500/20', text: 'text-slate-300', border: 'border-slate-500/40' },
+  in_progress: { bg: 'bg-amber-500/20', text: 'text-amber-300', border: 'border-amber-500/40' },
+  completed: { bg: 'bg-emerald-500/20', text: 'text-emerald-300', border: 'border-emerald-500/40' },
+  wrapping_up: { bg: 'bg-purple-500/20', text: 'text-purple-300', border: 'border-purple-500/40' },
 }

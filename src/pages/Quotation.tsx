@@ -11,11 +11,14 @@ import {
   CheckCircle,
   ArrowRight,
   Save,
+  Wallet,
+  CreditCard,
 } from 'lucide-react'
 import { useAppStore, STORE_CONFIG } from '@/store/useAppStore'
-import type { Script, RoomType } from '@/types'
-import { SCRIPT_TYPE_LABELS, DIFFICULTY_LABELS, ROOM_TYPE_LABELS } from '@/types'
+import type { Script, RoomType, PaymentMethod } from '@/types'
+import { SCRIPT_TYPE_LABELS, DIFFICULTY_LABELS, ROOM_TYPE_LABELS, PAYMENT_METHOD_LABELS } from '@/types'
 import { generateQuotationItems, calculateTotal, getCategoryLabel } from '@/utils/quotation'
+import { shiftChecklistTime, parseTimeToMinutes, sortTasksByTime } from '@/utils/checklist'
 
 const SCRIPT_TYPE_COLORS: Record<string, string> = {
   joy: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/40',
@@ -27,19 +30,24 @@ const SCRIPT_TYPE_COLORS: Record<string, string> = {
 
 const ROOM_TYPE_ORDER: RoomType[] = ['small', 'medium', 'large']
 
+const PAYMENT_METHOD_OPTIONS: PaymentMethod[] = ['cash', 'wechat', 'alipay', 'card', 'bank']
+
 export default function Quotation() {
   const navigate = useNavigate()
   const currentInquiryId = useAppStore((s) => s.currentInquiryId)
   const inquiries = useAppStore((s) => s.inquiries)
   const quotations = useAppStore((s) => s.quotations)
+  const checklists = useAppStore((s) => s.checklists)
   const getAvailableScripts = useAppStore((s) => s.getAvailableScripts)
   const getSuitableRoomType = useAppStore((s) => s.getSuitableRoomType)
   const occupiedSlots = useAppStore((s) => s.occupiedSlots)
   const addQuotation = useAppStore((s) => s.addQuotation)
   const updateQuotation = useAppStore((s) => s.updateQuotation)
+  const confirmQuotation = useAppStore((s) => s.confirmQuotation)
   const updateInquiry = useAppStore((s) => s.updateInquiry)
   const occupySlot = useAppStore((s) => s.occupySlot)
   const releaseSlot = useAppStore((s) => s.releaseSlot)
+  const replaceAllTasks = useAppStore((s) => s.replaceAllTasks)
 
   const inquiry = useMemo(
     () => inquiries.find((i) => i.id === currentInquiryId) ?? null,
@@ -57,6 +65,8 @@ export default function Quotation() {
   const [discount, setDiscount] = useState(0)
   const [isEditing, setIsEditing] = useState(false)
   const [initialSlotOccupied, setInitialSlotOccupied] = useState(false)
+  const [depositAmount, setDepositAmount] = useState(0)
+  const [depositMethod, setDepositMethod] = useState<PaymentMethod | ''>('')
 
   useEffect(() => {
     if (!inquiry) return
@@ -65,6 +75,8 @@ export default function Quotation() {
       setSelectedSlot(existingQuotation.timeSlot)
       setSelectedScripts(existingQuotation.selectedScripts)
       setDiscount(existingQuotation.discount)
+      setDepositAmount(existingQuotation.depositAmount ?? 0)
+      setDepositMethod(existingQuotation.depositMethod ?? '')
       setIsEditing(true)
     } else if (inquiry.timeSlot) {
       setSelectedSlot(inquiry.timeSlot)
@@ -115,6 +127,7 @@ export default function Quotation() {
   )
 
   const totalPrice = useMemo(() => calculateTotal(items, discount), [items, discount])
+  const remainingBalance = useMemo(() => Math.max(0, totalPrice - depositAmount), [totalPrice, depositAmount])
 
   const groupedItems = useMemo(() => {
     const groups: Record<string, typeof items> = {}
@@ -142,14 +155,28 @@ export default function Quotation() {
     )
   }
 
+  function shiftChecklistIfNeeded(oldSlot: string | null, newSlot: string) {
+    if (!existingQuotation || !oldSlot) return
+    const checklist = checklists.find((c) => c.quotationId === existingQuotation.id)
+    if (!checklist || checklist.tasks.length === 0) return
+    const oldBaseMinutes = parseTimeToMinutes(oldSlot)
+    const newBaseMinutes = parseTimeToMinutes(newSlot)
+    if (oldBaseMinutes === newBaseMinutes) return
+    const shifted = shiftChecklistTime(checklist.tasks, oldBaseMinutes, newBaseMinutes)
+    const sorted = sortTasksByTime(shifted)
+    replaceAllTasks(checklist.id, sorted)
+  }
+
   function handleSlotClick(slot: string) {
     if (occupiedForDate.includes(slot) && selectedSlot !== slot) return
     if (selectedSlot === slot) return
+    const oldSlot = selectedSlot
     if (selectedSlot) {
       releaseSlot(selectedDate, selectedSlot)
     }
     setSelectedSlot(slot)
     occupySlot(selectedDate, slot)
+    shiftChecklistIfNeeded(oldSlot, slot)
     if (inquiry) {
       updateInquiry(inquiry.id, { timeSlot: slot })
     }
@@ -181,6 +208,8 @@ export default function Quotation() {
         items,
         discount,
         totalPrice,
+        depositAmount,
+        depositMethod,
       })
     } else {
       const id = Date.now().toString(36) + Math.random().toString(36).slice(2)
@@ -192,10 +221,19 @@ export default function Quotation() {
         items,
         discount,
         totalPrice,
-        confirmed: true,
+        confirmed: false,
+        depositAmount: 0,
+        depositMethod: '' as const,
+        finalPaid: false,
+        finalPaymentMethod: '' as const,
         createdAt: new Date().toISOString(),
       }
       addQuotation(quotation)
+      if (depositMethod) {
+        confirmQuotation(id, depositAmount, depositMethod)
+      } else {
+        confirmQuotation(id, depositAmount)
+      }
       occupySlot(selectedDate, selectedSlot)
     }
     navigate('/checklist')
@@ -207,14 +245,14 @@ export default function Quotation() {
         <div className="text-center space-y-4">
           <BookOpen className="w-16 h-16 mx-auto text-gray-500" />
           <p className="text-gray-400 text-lg" style={{ fontFamily: "'Noto Sans SC', sans-serif" }}>
-            请先前往咨询页面创建咨询单
+            请先前往询价录入页面创建询价单
           </p>
           <button
-            onClick={() => navigate('/')}
+            onClick={() => navigate('/inquiry')}
             className="px-6 py-2 rounded-lg text-sm font-medium transition-colors"
             style={{ backgroundColor: '#e2a04a', color: '#0f0f1a' }}
           >
-            前往咨询页
+            前往询价录入
           </button>
         </div>
       </div>
@@ -534,6 +572,93 @@ export default function Quotation() {
             {discount > 0 && (
               <div className="text-xs text-gray-500 mt-1">已优惠 ¥{discount}</div>
             )}
+          </section>
+
+          <section
+            className="rounded-xl p-4 border"
+            style={{ backgroundColor: 'rgba(255,255,255,0.03)', borderColor: 'rgba(255,255,255,0.08)' }}
+          >
+            <h2
+              className="text-lg font-bold mb-3 flex items-center gap-2"
+              style={{ fontFamily: "'ZCOOL QingKe HuangYou', sans-serif", color: '#e2a04a' }}
+            >
+              <Wallet className="w-5 h-5" />
+              定金与支付
+            </h2>
+
+            {isEditing && existingQuotation?.finalPaid && (
+              <div
+                className="mb-3 p-3 rounded-lg text-sm"
+                style={{
+                  backgroundColor: 'rgba(51,184,154,0.1)',
+                  border: '1px solid rgba(51,184,154,0.3)',
+                  color: '#33b89a',
+                }}
+              >
+                <CheckCircle className="w-4 h-4 inline mr-1" />
+                尾款已结清 ({existingQuotation.finalPaymentMethod ? PAYMENT_METHOD_LABELS[existingQuotation.finalPaymentMethod] : ''})
+              </div>
+            )}
+
+            <div className="space-y-3">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <DollarSign className="w-4 h-4" style={{ color: '#e2a04a' }} />
+                  <label className="text-sm text-gray-300">定金金额</label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-400">¥</span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={depositAmount || ''}
+                    onChange={(e) => setDepositAmount(Math.max(0, Number(e.target.value)))}
+                    className="flex-1 rounded-lg px-3 py-2 text-white text-sm outline-none border transition-colors"
+                    style={{
+                      backgroundColor: 'rgba(255,255,255,0.05)',
+                      borderColor: 'rgba(255,255,255,0.1)',
+                    }}
+                    placeholder="0"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <CreditCard className="w-4 h-4" style={{ color: '#e2a04a' }} />
+                  <label className="text-sm text-gray-300">支付方式</label>
+                </div>
+                <select
+                  value={depositMethod}
+                  onChange={(e) => setDepositMethod(e.target.value as PaymentMethod | '')}
+                  className="w-full rounded-lg px-3 py-2 text-white text-sm outline-none border transition-colors"
+                  style={{
+                    backgroundColor: 'rgba(255,255,255,0.05)',
+                    borderColor: 'rgba(255,255,255,0.1)',
+                  }}
+                >
+                  <option value="" style={{ backgroundColor: '#1a1a2e' }}>请选择支付方式</option>
+                  {PAYMENT_METHOD_OPTIONS.map((method) => (
+                    <option key={method} value={method} style={{ backgroundColor: '#1a1a2e' }}>
+                      {PAYMENT_METHOD_LABELS[method]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div
+                className="pt-3 mt-3 border-t flex items-center justify-between"
+                style={{ borderColor: 'rgba(255,255,255,0.08)' }}
+              >
+                <span className="text-sm text-gray-400">剩余尾款</span>
+                <span
+                  className="text-xl font-bold"
+                  style={{ fontFamily: "'ZCOOL QingKe HuangYou', sans-serif", color: remainingBalance > 0 ? '#e2a04a' : '#33b89a' }}
+                >
+                  ¥{remainingBalance}
+                </span>
+              </div>
+            </div>
           </section>
 
           <button
