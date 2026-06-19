@@ -15,11 +15,15 @@ import {
   DollarSign,
   CreditCard,
   CheckCircle,
+  Users,
+  Copy,
+  Receipt,
 } from 'lucide-react'
 import { useAppStore } from '@/store/useAppStore'
-import { PAYMENT_METHOD_LABELS, ROLE_LABELS, ROLE_COLORS } from '@/types'
+import { PAYMENT_METHOD_LABELS, ROLE_LABELS, ROLE_COLORS, SCRIPT_TYPE_LABELS } from '@/types'
 import type { PaymentMethod, TaskStatus, TaskRole, ChecklistTask } from '@/types'
 import { generateChecklistTasks, parseTimeToMinutes } from '@/utils/checklist'
+import { getCategoryLabel } from '@/utils/quotation'
 
 const STATUS_CYCLE: TaskStatus[] = ['pending', 'in_progress', 'done']
 
@@ -45,6 +49,20 @@ const ROLE_OPTIONS: { value: TaskRole; label: string }[] = [
   { value: 'front_desk', label: '前台' },
   { value: 'dm', label: 'DM' },
   { value: 'logistics', label: '后勤' },
+]
+
+const FILTER_OPTIONS: { value: 'all' | TaskRole; label: string }[] = [
+  { value: 'all', label: '全部' },
+  { value: 'front_desk', label: ROLE_LABELS.front_desk },
+  { value: 'dm', label: ROLE_LABELS.dm },
+  { value: 'logistics', label: ROLE_LABELS.logistics },
+]
+
+const BULK_FROM_OPTIONS: { value: 'all' | TaskRole; label: string }[] = [
+  { value: 'all', label: '全部' },
+  { value: 'front_desk', label: ROLE_LABELS.front_desk },
+  { value: 'dm', label: ROLE_LABELS.dm },
+  { value: 'logistics', label: ROLE_LABELS.logistics },
 ]
 
 const PAYMENT_METHOD_OPTIONS: { value: PaymentMethod; label: string }[] = [
@@ -93,6 +111,13 @@ export default function Checklist() {
   })
   const [finalPaymentMethod, setFinalPaymentMethod] = useState<PaymentMethod>('cash')
   const [showFinalPaymentForm, setShowFinalPaymentForm] = useState(false)
+  const [roleFilter, setRoleFilter] = useState<'all' | TaskRole>('all')
+  const [showBulkTransfer, setShowBulkTransfer] = useState(false)
+  const [bulkFromRole, setBulkFromRole] = useState<'all' | TaskRole>('all')
+  const [bulkToAssignee, setBulkToAssignee] = useState('')
+  const [bulkToRole, setBulkToRole] = useState<TaskRole>('front_desk')
+  const [showConfirmationSlip, setShowConfirmationSlip] = useState(false)
+  const [copied, setCopied] = useState(false)
 
   const quotation = useMemo(
     () => quotations.find((q) => q.id === currentQuotationId),
@@ -128,16 +153,21 @@ export default function Checklist() {
     [checklists, currentQuotationId]
   )
 
-  const tasks = checklist?.tasks ?? []
+  const allTasks = checklist?.tasks ?? []
+
+  const tasks = useMemo(() => {
+    if (roleFilter === 'all') return allTasks
+    return allTasks.filter((t) => t.role === roleFilter)
+  }, [allTasks, roleFilter])
 
   const timeSlotChanged = useMemo(() => {
-    if (!quotation || tasks.length === 0) return false
-    const firstTaskTime = tasks[0].time
+    if (!quotation || allTasks.length === 0) return false
+    const firstTaskTime = allTasks[0].time
     const firstTaskMinutes = parseTimeToMinutes(firstTaskTime)
     const quotationMinutes = parseTimeToMinutes(quotation.timeSlot)
     const impliedBaseFromFirstTask = firstTaskMinutes + 60
     return Math.abs(impliedBaseFromFirstTask - quotationMinutes) > 1
-  }, [quotation, tasks])
+  }, [quotation, allTasks])
 
   const handleCycleStatus = (taskId: string, current: TaskStatus) => {
     if (!checklist || editingTaskId === taskId) return
@@ -237,8 +267,75 @@ export default function Checklist() {
     setShowFinalPaymentForm(false)
   }
 
-  const doneCount = tasks.filter((t) => t.status === 'done').length
-  const totalCount = tasks.length
+  const handleBulkTransfer = () => {
+    if (!checklist || !bulkToAssignee.trim()) return
+    const targetTasks = bulkFromRole === 'all' ? allTasks : allTasks.filter((t) => t.role === bulkFromRole)
+    targetTasks.forEach((task) => {
+      updateTask(checklist.id, task.id, {
+        assignee: bulkToAssignee.trim(),
+        role: bulkToRole,
+      })
+    })
+    setShowBulkTransfer(false)
+    setBulkFromRole('all')
+    setBulkToAssignee('')
+    setBulkToRole('front_desk')
+  }
+
+  const categorySubtotals = useMemo(() => {
+    const map: Record<string, number> = {}
+    quotation?.items.forEach((item) => {
+      const label = getCategoryLabel(item.category)
+      map[label] = (map[label] || 0) + item.subtotal
+    })
+    return map
+  }, [quotation])
+
+  const confirmationText = useMemo(() => {
+    if (!quotation || !inquiry) return ''
+    const lines: string[] = []
+    lines.push('生日包场确认单')
+    lines.push('====================')
+    lines.push(`日期：${inquiry.date}`)
+    lines.push(`时间：${quotation.timeSlot}`)
+    lines.push(`人数：${inquiry.guestCount}人`)
+    lines.push(`客户姓名：${inquiry.customerName}`)
+    lines.push('')
+    lines.push('剧本清单：')
+    quotation.selectedScripts.forEach((s) => {
+      lines.push(`  · ${s.name}（${SCRIPT_TYPE_LABELS[s.type]}，${s.duration}小时）`)
+    })
+    lines.push('')
+    lines.push('费用明细：')
+    Object.entries(categorySubtotals).forEach(([label, amount]) => {
+      lines.push(`  · ${label}：¥${amount.toFixed(2)}`)
+    })
+    if (quotation.discount > 0) {
+      lines.push(`  · 优惠：-¥${quotation.discount.toFixed(2)}`)
+    }
+    lines.push(`  总计：¥${quotation.totalPrice.toFixed(2)}`)
+    lines.push('')
+    if (quotation.depositAmount > 0) {
+      lines.push(`已收订金：¥${quotation.depositAmount.toFixed(2)}${quotation.depositMethod ? `（${PAYMENT_METHOD_LABELS[quotation.depositMethod]}）` : ''}`)
+    }
+    const remaining = Math.max(0, quotation.totalPrice - quotation.depositAmount)
+    lines.push(`尾款：¥${remaining.toFixed(2)}`)
+    lines.push('')
+    lines.push('感谢您的预订，如有疑问请联系店长')
+    return lines.join('\n')
+  }, [quotation, inquiry, categorySubtotals])
+
+  const handleCopyConfirmation = async () => {
+    try {
+      await navigator.clipboard.writeText(confirmationText)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+    }
+  }
+
+  const doneCount = allTasks.filter((t) => t.status === 'done').length
+  const totalCount = allTasks.length
   const totalPrice = quotation?.totalPrice ?? 0
   const depositAmount = quotation?.depositAmount ?? 0
   const depositMethod = quotation?.depositMethod
@@ -337,16 +434,27 @@ export default function Checklist() {
               ))}
             </div>
           </div>
-          {checklist && (
-            <div className="text-right">
-              <div className="text-sm text-gray-400 print:text-gray-600">
-                进度
+          <div className="flex items-center gap-3">
+            {checklist && (
+              <div className="text-right">
+                <div className="text-sm text-gray-400 print:text-gray-600">
+                  进度
+                </div>
+                <div className="text-xl font-bold" style={{ color: '#e2a04a' }}>
+                  {doneCount}/{totalCount}
+                </div>
               </div>
-              <div className="text-xl font-bold" style={{ color: '#e2a04a' }}>
-                {doneCount}/{totalCount}
-              </div>
+            )}
+            <div className="print:hidden">
+              <button
+                onClick={() => setShowBulkTransfer(true)}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium bg-white/5 text-gray-300 hover:bg-white/10 transition-colors"
+              >
+                <Users size={14} />
+                批量转派
+              </button>
             </div>
-          )}
+          </div>
         </div>
 
         <div className="mt-4 p-4 rounded-xl print:border print:border-gray-300" style={{ backgroundColor: '#16162a' }}>
@@ -442,6 +550,22 @@ export default function Checklist() {
       </header>
 
       <main className="flex-1 overflow-y-auto px-6 py-6">
+        <div className="print:hidden mb-4 flex items-center gap-2">
+          {FILTER_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setRoleFilter(opt.value)}
+              className="px-4 py-1.5 rounded-lg text-sm font-medium transition-colors"
+              style={{
+                backgroundColor: roleFilter === opt.value ? '#e2a04a' : 'rgba(255,255,255,0.05)',
+                color: roleFilter === opt.value ? '#0f0f1a' : '#9ca3af',
+              }}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
         <div className="relative ml-4">
           {tasks.length > 0 && (
             <div className="absolute left-[11px] top-2 bottom-2 w-0.5 bg-white/10 print:bg-gray-300" />
@@ -708,6 +832,13 @@ export default function Checklist() {
             打印清单
           </button>
           <button
+            onClick={() => setShowConfirmationSlip(true)}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium bg-white/5 text-gray-300 hover:bg-white/10 transition-colors"
+          >
+            <Receipt size={16} />
+            生成顾客确认单
+          </button>
+          <button
             onClick={() => setShowRegenerateConfirm(true)}
             className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium bg-white/5 text-gray-300 hover:bg-white/10 transition-colors"
           >
@@ -733,6 +864,183 @@ export default function Checklist() {
           </button>
         </div>
       </div>
+
+      {showBulkTransfer && (
+        <div className="print:hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-[#1a1a2e] rounded-xl p-6 w-full max-w-md mx-4 border border-white/10">
+            <h3
+              className="text-lg font-bold text-white mb-4"
+              style={{ fontFamily: "'ZCOOL QingKe HuangYou', cursive" }}
+            >
+              批量转派任务
+            </h3>
+            <div className="space-y-4">
+              <div>
+                <label className="text-[11px] text-gray-500 block mb-1">来源角色</label>
+                <select
+                  value={bulkFromRole}
+                  onChange={(e) => setBulkFromRole(e.target.value as 'all' | TaskRole)}
+                  className="w-full px-3 py-2 text-sm rounded bg-white/5 border border-white/10 text-white focus:outline-none focus:border-[#e2a04a]"
+                >
+                  {BULK_FROM_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value} className="bg-[#0f0f1a]">
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-[11px] text-gray-500 block mb-1">新负责人</label>
+                <input
+                  type="text"
+                  value={bulkToAssignee}
+                  onChange={(e) => setBulkToAssignee(e.target.value)}
+                  className="w-full px-3 py-2 text-sm rounded bg-white/5 border border-white/10 text-white focus:outline-none focus:border-[#e2a04a]"
+                  placeholder="请输入姓名，如：小王"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] text-gray-500 block mb-1">新角色</label>
+                <select
+                  value={bulkToRole}
+                  onChange={(e) => setBulkToRole(e.target.value as TaskRole)}
+                  className="w-full px-3 py-2 text-sm rounded bg-white/5 border border-white/10 text-white focus:outline-none focus:border-[#e2a04a]"
+                >
+                  {ROLE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value} className="bg-[#0f0f1a]">
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-3 mt-6">
+              <button
+                onClick={() => {
+                  setShowBulkTransfer(false)
+                  setBulkFromRole('all')
+                  setBulkToAssignee('')
+                  setBulkToRole('front_desk')
+                }}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-white/5 text-gray-300 hover:bg-white/10 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleBulkTransfer}
+                disabled={!bulkToAssignee.trim()}
+                className="px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{ backgroundColor: '#e2a04a', color: '#0f0f1a' }}
+              >
+                确认转派
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showConfirmationSlip && quotation && inquiry && (
+        <div className="print:hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-[#1a1a2e] rounded-xl p-6 w-full max-w-lg mx-4 border border-white/10 max-h-[85vh] overflow-y-auto">
+            <div className="bg-white rounded-lg p-6 text-black" style={{ fontFamily: "'Noto Sans SC', sans-serif" }}>
+              <h2
+                className="text-xl font-bold text-center mb-4"
+                style={{ fontFamily: "'ZCOOL QingKe HuangYou', cursive" }}
+              >
+                生日包场确认单
+              </h2>
+              <div className="border-t border-gray-300 pt-4 space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-gray-600">日期：</span>
+                  <span className="font-medium">{inquiry.date}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-600">时间：</span>
+                  <span className="font-medium">{quotation.timeSlot}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-600">人数：</span>
+                  <span className="font-medium">{inquiry.guestCount}人</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-600">客户姓名：</span>
+                  <span className="font-medium">{inquiry.customerName}</span>
+                </div>
+              </div>
+
+              <div className="mt-5">
+                <div className="text-sm font-semibold mb-2 text-gray-800">剧本清单</div>
+                <div className="space-y-1.5">
+                  {quotation.selectedScripts.map((s) => (
+                    <div key={s.id} className="flex justify-between text-sm">
+                      <span>{s.name}</span>
+                      <span className="text-gray-600">{SCRIPT_TYPE_LABELS[s.type]} · {s.duration}小时</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-5">
+                <div className="text-sm font-semibold mb-2 text-gray-800">费用明细</div>
+                <div className="space-y-1.5">
+                  {Object.entries(categorySubtotals).map(([label, amount]) => (
+                    <div key={label} className="flex justify-between text-sm">
+                      <span>{label}</span>
+                      <span className="font-medium">¥{amount.toFixed(2)}</span>
+                    </div>
+                  ))}
+                  {quotation.discount > 0 && (
+                    <div className="flex justify-between text-sm">
+                      <span>优惠</span>
+                      <span className="text-[#c84b31]">-¥{quotation.discount.toFixed(2)}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between text-base font-bold pt-2 border-t border-gray-200 mt-2">
+                    <span>总计</span>
+                    <span style={{ color: '#e2a04a' }}>¥{quotation.totalPrice.toFixed(2)}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-5 pt-4 border-t border-gray-200 space-y-2 text-sm">
+                {quotation.depositAmount > 0 && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">已收订金{quotation.depositMethod ? `（${PAYMENT_METHOD_LABELS[quotation.depositMethod]}）` : ''}：</span>
+                    <span className="text-[#33b89a] font-medium">¥{quotation.depositAmount.toFixed(2)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between">
+                  <span className="text-gray-600">尾款：</span>
+                  <span className="font-medium" style={{ color: remaining > 0 ? '#c84b31' : '#33b89a' }}>
+                    ¥{remaining.toFixed(2)}
+                  </span>
+                </div>
+              </div>
+
+              <div className="mt-6 pt-4 border-t border-gray-200 text-center text-sm text-gray-600">
+                感谢您的预订，如有疑问请联系店长
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 mt-4">
+              <button
+                onClick={handleCopyConfirmation}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-white/5 text-gray-300 hover:bg-white/10 transition-colors"
+              >
+                <Copy size={14} />
+                {copied ? '已复制' : '复制内容'}
+              </button>
+              <button
+                onClick={() => setShowConfirmationSlip(false)}
+                className="px-4 py-2 rounded-lg text-sm font-medium"
+                style={{ backgroundColor: '#e2a04a', color: '#0f0f1a' }}
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showRegenerateConfirm && (
         <div className="print:hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">

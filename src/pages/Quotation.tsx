@@ -13,6 +13,9 @@ import {
   Save,
   Wallet,
   CreditCard,
+  Copy,
+  Receipt,
+  X,
 } from 'lucide-react'
 import { useAppStore, STORE_CONFIG } from '@/store/useAppStore'
 import type { Script, RoomType, PaymentMethod } from '@/types'
@@ -67,6 +70,7 @@ export default function Quotation() {
   const [initialSlotOccupied, setInitialSlotOccupied] = useState(false)
   const [depositAmount, setDepositAmount] = useState(0)
   const [depositMethod, setDepositMethod] = useState<PaymentMethod | ''>('')
+  const [showConfirmationModal, setShowConfirmationModal] = useState(false)
 
   useEffect(() => {
     if (!inquiry) return
@@ -137,6 +141,47 @@ export default function Quotation() {
     })
     return groups
   }, [items])
+
+  const categoryTotals = useMemo(() => {
+    const totals: Record<string, number> = {}
+    items.forEach((item) => {
+      totals[item.category] = (totals[item.category] || 0) + item.subtotal
+    })
+    return totals
+  }, [items])
+
+  function generateConfirmationText(): string {
+    const lines: string[] = []
+    lines.push('生日包场确认单')
+    lines.push(`日期：${selectedDate}  时间：${selectedSlot || ''}`)
+    lines.push(`客户：${inquiry?.customerName || ''}  人数：${inquiry?.guestCount || 0}人`)
+    lines.push('剧本：')
+    selectedScripts.forEach((script) => {
+      lines.push(`- ${script.name} (${SCRIPT_TYPE_LABELS[script.type]}, ${script.duration}小时, ¥${script.pricePerPerson}/人)`)
+    })
+    lines.push('费用明细：')
+    Object.entries(categoryTotals).forEach(([category, total]) => {
+      lines.push(`${getCategoryLabel(category as never)}: ¥${total}`)
+    })
+    if (discount > 0) {
+      lines.push(`优惠: -¥${discount}`)
+    }
+    lines.push(`合计: ¥${totalPrice}`)
+    if (depositAmount > 0) {
+      const methodLabel = depositMethod ? PAYMENT_METHOD_LABELS[depositMethod] : ''
+      lines.push(`已收订金${methodLabel ? `(${methodLabel})` : ''}: ¥${depositAmount}`)
+    }
+    lines.push(`尾款: ¥${remainingBalance}`)
+    lines.push('感谢您的预订，如有疑问请联系店长')
+    return lines.join('\n')
+  }
+
+  async function handleCopyConfirmation() {
+    try {
+      await navigator.clipboard.writeText(generateConfirmationText())
+    } catch {
+    }
+  }
 
   function getRoomsForScript(script: Script) {
     return STORE_CONFIG.rooms.filter((room) => {
@@ -685,8 +730,221 @@ export default function Quotation() {
               </>
             )}
           </button>
+
+          {isEditing && existingQuotation?.confirmed && (
+            <button
+              onClick={() => setShowConfirmationModal(true)}
+              className="w-full py-3 rounded-xl font-bold text-base flex items-center justify-center gap-2 transition-all mt-3"
+              style={{
+                backgroundColor: 'rgba(51,184,154,0.15)',
+                color: '#33b89a',
+                border: '1px solid rgba(51,184,154,0.4)',
+              }}
+            >
+              <Receipt className="w-5 h-5" />
+              生成顾客确认单
+            </button>
+          )}
         </div>
       </div>
+
+      {showConfirmationModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ backgroundColor: 'rgba(0,0,0,0.7)' }}
+          onClick={() => setShowConfirmationModal(false)}
+        >
+          <div
+            className="rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto"
+            style={{ backgroundColor: '#1a1a2e', border: '1px solid rgba(255,255,255,0.1)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-6">
+              <h2
+                className="text-xl font-bold flex items-center gap-2"
+                style={{ fontFamily: "'ZCOOL QingKe HuangYou', sans-serif", color: '#e2a04a' }}
+              >
+                <Receipt className="w-5 h-5" />
+                生日包场确认单
+              </h2>
+              <button
+                onClick={() => setShowConfirmationModal(false)}
+                className="p-2 rounded-lg transition-colors"
+                style={{ color: '#9ca3af' }}
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4" style={{ fontFamily: "'Noto Sans SC', sans-serif" }}>
+              <div className="flex items-center gap-6 text-sm">
+                <div className="flex items-center gap-2">
+                  <Calendar className="w-4 h-4 text-gray-400" />
+                  <span className="text-gray-300">{selectedDate}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-gray-400" />
+                  <span className="text-gray-300">{selectedSlot}</span>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-6 text-sm">
+                <div className="flex items-center gap-2">
+                  <Users className="w-4 h-4 text-gray-400" />
+                  <span className="text-gray-300">{inquiry?.customerName}</span>
+                </div>
+                <div>
+                  <span className="text-gray-400">人数：</span>
+                  <span className="text-gray-300">{inquiry?.guestCount}人</span>
+                </div>
+              </div>
+
+              <div
+                className="pt-4 mt-2 border-t"
+                style={{ borderColor: 'rgba(255,255,255,0.08)' }}
+              >
+                <div
+                  className="text-xs font-bold uppercase tracking-wider mb-3"
+                  style={{ color: '#e2a04a' }}
+                >
+                  剧本
+                </div>
+                <div className="space-y-2">
+                  {selectedScripts.map((script) => (
+                    <div
+                      key={script.id}
+                      className="flex items-center justify-between text-sm py-1"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-white">{script.name}</span>
+                        <span
+                          className={`text-xs px-2 py-0.5 rounded-full border ${SCRIPT_TYPE_COLORS[script.type]}`}
+                        >
+                          {SCRIPT_TYPE_LABELS[script.type]}
+                        </span>
+                      </div>
+                      <span className="text-gray-400 text-xs">
+                        {script.duration}小时 · ¥{script.pricePerPerson}/人
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div
+                className="pt-4 border-t"
+                style={{ borderColor: 'rgba(255,255,255,0.08)' }}
+              >
+                <div
+                  className="text-xs font-bold uppercase tracking-wider mb-3"
+                  style={{ color: '#e2a04a' }}
+                >
+                  费用明细
+                </div>
+                <div className="space-y-2">
+                  {Object.entries(categoryTotals).map(([category, total]) => (
+                    <div
+                      key={category}
+                      className="flex items-center justify-between text-sm py-1"
+                    >
+                      <span className="text-gray-300">{getCategoryLabel(category as never)}</span>
+                      <span className="text-white">¥{total}</span>
+                    </div>
+                  ))}
+                  {discount > 0 && (
+                    <div className="flex items-center justify-between text-sm py-1">
+                      <span className="text-gray-400">优惠减免</span>
+                      <span style={{ color: '#33b89a' }}>-¥{discount}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div
+                className="pt-4 mt-2 border-t text-center"
+                style={{ borderColor: 'rgba(255,255,255,0.08)' }}
+              >
+                <div className="text-sm text-gray-400 mb-1">合计金额</div>
+                <div
+                  className="text-4xl font-bold"
+                  style={{ fontFamily: "'ZCOOL QingKe HuangYou', sans-serif", color: '#e2a04a' }}
+                >
+                  ¥{totalPrice}
+                </div>
+              </div>
+
+              {depositAmount > 0 && (
+                <div
+                  className="pt-4 border-t"
+                  style={{ borderColor: 'rgba(255,255,255,0.08)' }}
+                >
+                  <div className="flex items-center justify-between text-sm py-1">
+                    <span className="text-gray-400">
+                      已收订金
+                      {depositMethod && (
+                        <span className="text-gray-500">
+                          ({PAYMENT_METHOD_LABELS[depositMethod]})
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-white">¥{depositAmount}</span>
+                  </div>
+                </div>
+              )}
+
+              <div
+                className="pt-4 border-t"
+                style={{ borderColor: 'rgba(255,255,255,0.08)' }}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-400">剩余尾款</span>
+                  <span
+                    className="text-xl font-bold"
+                    style={{
+                      fontFamily: "'ZCOOL QingKe HuangYou', sans-serif",
+                      color: remainingBalance > 0 ? '#c84b31' : '#33b89a',
+                    }}
+                  >
+                    ¥{remainingBalance}
+                  </span>
+                </div>
+              </div>
+
+              <div
+                className="pt-4 mt-2 border-t text-center text-sm"
+                style={{ borderColor: 'rgba(255,255,255,0.08)', color: '#6b7280' }}
+              >
+                感谢您的预订，如有疑问请联系店长
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={handleCopyConfirmation}
+                className="flex-1 py-3 rounded-xl font-bold text-base flex items-center justify-center gap-2 transition-all"
+                style={{
+                  backgroundColor: '#e2a04a',
+                  color: '#0f0f1a',
+                }}
+              >
+                <Copy className="w-5 h-5" />
+                复制内容
+              </button>
+              <button
+                onClick={() => setShowConfirmationModal(false)}
+                className="flex-1 py-3 rounded-xl font-bold text-base flex items-center justify-center gap-2 transition-all"
+                style={{
+                  backgroundColor: 'rgba(255,255,255,0.05)',
+                  color: '#9ca3af',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                }}
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

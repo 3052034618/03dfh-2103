@@ -8,12 +8,14 @@ import {
   Clapperboard,
   PartyPopper,
   ChevronRight,
+  ChevronDown,
   Phone,
   DoorOpen,
   X,
   DollarSign,
   CheckCircle,
   AlertCircle,
+  Pencil,
 } from 'lucide-react'
 import { useAppStore } from '@/store/useAppStore'
 import {
@@ -25,7 +27,7 @@ import {
   DIFFICULTY_LABELS,
   ROOM_TYPE_LABELS,
 } from '@/types'
-import type { OrderStatus, InquiryData, QuotationData, ChecklistData } from '@/types'
+import type { OrderStatus, InquiryData, QuotationData, ChecklistData, PaymentMethod } from '@/types'
 import { computeOrderStatus, getNextPendingTask } from '@/utils/checklist'
 
 interface BookingBase {
@@ -38,6 +40,9 @@ interface BookingWithStatus extends BookingBase {
   status: OrderStatus
 }
 
+type PaymentGroupKey = 'deposit_received' | 'final_pending' | 'final_paid'
+type ViewMode = 'schedule' | 'payment'
+
 const TAB_FILTERS: (OrderStatus | 'all')[] = [
   'all',
   'not_started',
@@ -46,12 +51,20 @@ const TAB_FILTERS: (OrderStatus | 'all')[] = [
   'completed',
 ]
 
+const PAYMENT_GROUPS: { key: PaymentGroupKey; label: string; color: string }[] = [
+  { key: 'deposit_received', label: '订金已收', color: '#e2a04a' },
+  { key: 'final_pending', label: '尾款待收', color: '#c84b31' },
+  { key: 'final_paid', label: '已结清', color: '#33b89a' },
+]
+
 export default function Dashboard() {
   const navigate = useNavigate()
   const getTodayConfirmed = useAppStore((s) => s.getTodayConfirmed)
   const setCurrentInquiryId = useAppStore((s) => s.setCurrentInquiryId)
   const setCurrentQuotationId = useAppStore((s) => s.setCurrentQuotationId)
   const setCurrentChecklistId = useAppStore((s) => s.setCurrentChecklistId)
+  const markFinalPaid = useAppStore((s) => s.markFinalPaid)
+  const updateQuotation = useAppStore((s) => s.updateQuotation)
 
   const [selectedDate, setSelectedDate] = useState(() => {
     const d = new Date()
@@ -59,7 +72,22 @@ export default function Dashboard() {
   })
 
   const [activeTab, setActiveTab] = useState<OrderStatus | 'all'>('all')
+  const [viewMode, setViewMode] = useState<ViewMode>('schedule')
   const [selectedBooking, setSelectedBooking] = useState<BookingWithStatus | null>(null)
+  const [detailKey, setDetailKey] = useState(0)
+
+  const [expandedPaymentGroups, setExpandedPaymentGroups] = useState<Record<PaymentGroupKey, boolean>>({
+    deposit_received: true,
+    final_pending: true,
+    final_paid: true,
+  })
+
+  const [finalPaymentMethod, setFinalPaymentMethod] = useState<PaymentMethod>('wechat')
+  const [showFinalPaymentConfirm, setShowFinalPaymentConfirm] = useState(false)
+
+  const [isEditingDeposit, setIsEditingDeposit] = useState(false)
+  const [editDepositAmount, setEditDepositAmount] = useState<number>(0)
+  const [editDepositMethod, setEditDepositMethod] = useState<PaymentMethod | ''>('')
 
   const todayBookings: BookingBase[] = useMemo(
     () => getTodayConfirmed(selectedDate) as BookingBase[],
@@ -89,6 +117,42 @@ export default function Dashboard() {
     return counts
   }, [bookingsWithStatus])
 
+  const paymentStats = useMemo(() => {
+    let depositCount = 0
+    let depositTotal = 0
+    let finalPendingCount = 0
+    let finalPendingTotal = 0
+    let settledCount = 0
+    let totalRevenue = 0
+
+    bookingsWithStatus.forEach((b) => {
+      const deposit = b.quotation.depositAmount || 0
+      const total = b.quotation.totalPrice || 0
+      totalRevenue += total
+
+      if (deposit > 0) {
+        depositCount++
+        depositTotal += deposit
+      }
+
+      if (b.quotation.finalPaid) {
+        settledCount++
+      } else if (b.quotation.confirmed) {
+        finalPendingCount++
+        finalPendingTotal += total - deposit
+      }
+    })
+
+    return {
+      depositCount,
+      depositTotal,
+      finalPendingCount,
+      finalPendingTotal,
+      settledCount,
+      totalRevenue,
+    }
+  }, [bookingsWithStatus])
+
   const filteredBookings = useMemo(() => {
     const filtered =
       activeTab === 'all'
@@ -99,28 +163,31 @@ export default function Dashboard() {
     )
   }, [bookingsWithStatus, activeTab])
 
-  const totalGuests = useMemo(
-    () => bookingsWithStatus.reduce((sum, b) => sum + b.inquiry.guestCount, 0),
-    [bookingsWithStatus]
-  )
+  const paymentGroupedBookings = useMemo(() => {
+    const groups: Record<PaymentGroupKey, BookingWithStatus[]> = {
+      deposit_received: [],
+      final_pending: [],
+      final_paid: [],
+    }
 
-  const completedTasks = useMemo(
-    () =>
-      bookingsWithStatus.reduce((sum, b) => {
-        if (!b.checklist) return sum
-        return sum + b.checklist.tasks.filter((t) => t.status === 'done').length
-      }, 0),
-    [bookingsWithStatus]
-  )
+    bookingsWithStatus.forEach((b) => {
+      if (b.quotation.finalPaid) {
+        groups.final_paid.push(b)
+      } else if (b.quotation.depositAmount && b.quotation.depositAmount > 0) {
+        groups.final_pending.push(b)
+      } else {
+        groups.deposit_received.push(b)
+      }
+    })
 
-  const totalTasks = useMemo(
-    () =>
-      bookingsWithStatus.reduce((sum, b) => {
-        if (!b.checklist) return sum
-        return sum + b.checklist.tasks.length
-      }, 0),
-    [bookingsWithStatus]
-  )
+    Object.keys(groups).forEach((key) => {
+      groups[key as PaymentGroupKey].sort((a, b) =>
+        a.quotation.timeSlot.localeCompare(b.quotation.timeSlot)
+      )
+    })
+
+    return groups
+  }, [bookingsWithStatus])
 
   const goToQuotation = (booking: BookingWithStatus) => {
     setCurrentInquiryId(booking.inquiry.id)
@@ -146,6 +213,332 @@ export default function Dashboard() {
   const getTabLabel = (tab: OrderStatus | 'all') => {
     if (tab === 'all') return '全部'
     return ORDER_STATUS_LABELS[tab]
+  }
+
+  const togglePaymentGroup = (key: PaymentGroupKey) => {
+    setExpandedPaymentGroups((prev) => ({ ...prev, [key]: !prev[key] }))
+  }
+
+  const handleMarkFinalPaid = () => {
+    if (!selectedBooking) return
+    markFinalPaid(selectedBooking.quotation.id, finalPaymentMethod)
+    setShowFinalPaymentConfirm(false)
+    setDetailKey((k) => k + 1)
+  }
+
+  const startEditDeposit = () => {
+    if (!selectedBooking) return
+    setEditDepositAmount(selectedBooking.quotation.depositAmount || 0)
+    setEditDepositMethod(selectedBooking.quotation.depositMethod || '')
+    setIsEditingDeposit(true)
+  }
+
+  const saveEditDeposit = () => {
+    if (!selectedBooking) return
+    updateQuotation(selectedBooking.quotation.id, {
+      depositAmount: editDepositAmount,
+      depositMethod: editDepositMethod,
+    })
+    setIsEditingDeposit(false)
+    setDetailKey((k) => k + 1)
+  }
+
+  const renderOrderCard = (booking: BookingWithStatus) => {
+    const doneCount = booking.checklist
+      ? booking.checklist.tasks.filter((t) => t.status === 'done').length
+      : 0
+    const totalCount = booking.checklist
+      ? booking.checklist.tasks.length
+      : 0
+    const progress = totalCount > 0 ? (doneCount / totalCount) * 100 : 0
+    const depositAmount = booking.quotation.depositAmount || 0
+    const showFinalUnpaid =
+      !booking.quotation.finalPaid &&
+      (booking.status === 'completed' || booking.status === 'in_progress' || booking.status === 'wrapping_up')
+
+    return (
+      <div
+        key={booking.quotation.id}
+        onClick={() => setSelectedBooking(booking)}
+        className="cursor-pointer rounded-xl border p-4 transition-all hover:border-amber-500/40"
+        style={{
+          backgroundColor: '#0f0f1a',
+          borderColor: '#2a2a40',
+        }}
+      >
+        <div className="flex items-start gap-4">
+          <div
+            className="flex-shrink-0 rounded-lg px-3 py-2 text-center"
+            style={{ backgroundColor: '#e2a04a22' }}
+          >
+            <div
+              className="text-lg font-bold"
+              style={{
+                fontFamily: "'ZCOOL QingKe HuangYou', cursive",
+                color: '#e2a04a',
+              }}
+            >
+              {booking.quotation.timeSlot}
+            </div>
+          </div>
+
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-3">
+              <h3
+                className="text-base font-semibold truncate"
+                style={{ color: '#e2e2f0' }}
+              >
+                {booking.inquiry.customerName}
+                <span
+                  className="ml-2 text-xs font-normal"
+                  style={{ color: '#6a6a80' }}
+                >
+                  的生日派对
+                </span>
+              </h3>
+              <span
+                className="flex-shrink-0 rounded-full border px-2 py-0.5 text-xs"
+                style={{
+                  backgroundColor: 'rgba(226, 160, 74, 0.1)',
+                  borderColor: 'rgba(226, 160, 74, 0.3)',
+                  color: '#e2a04a',
+                }}
+              >
+                {ORDER_STATUS_LABELS[booking.status]}
+              </span>
+            </div>
+
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+              <span
+                className="flex items-center gap-1"
+                style={{ color: '#8b8ba3' }}
+              >
+                <Users size={12} />
+                {booking.inquiry.guestCount}人
+              </span>
+              <span
+                className="flex items-center gap-1"
+                style={{ color: '#8b8ba3' }}
+              >
+                <Clock size={12} />
+                {booking.quotation.selectedScripts
+                  .reduce((s, sc) => s + sc.duration, 0)
+                  .toFixed(1)}
+                小时
+              </span>
+              {booking.inquiry.needPrivateRoom && (
+                <span
+                  className="inline-block rounded px-1.5 py-0.5 text-[10px]"
+                  style={{ backgroundColor: '#33b89a22', color: '#33b89a' }}
+                >
+                  独立包间
+                </span>
+              )}
+            </div>
+
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {booking.quotation.selectedScripts.map((s) => (
+                <span
+                  key={s.id}
+                  className="rounded px-2 py-0.5 text-xs"
+                  style={{
+                    backgroundColor: '#2a2a40',
+                    color: '#a0a0b8',
+                  }}
+                >
+                  {s.name}
+                </span>
+              ))}
+            </div>
+
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {depositAmount > 0 && (
+                <span
+                  className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px]"
+                  style={{ backgroundColor: '#33b89a22', color: '#33b89a' }}
+                >
+                  <CheckCircle size={10} />
+                  已收订金 ¥{depositAmount}
+                </span>
+              )}
+              {showFinalUnpaid && (
+                <span
+                  className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-medium"
+                  style={{ backgroundColor: '#c84b3122', color: '#c84b31' }}
+                >
+                  <AlertCircle size={10} />
+                  未收尾款
+                </span>
+              )}
+            </div>
+
+            {booking.checklist && (
+              <div className="mt-3">
+                <div className="mb-1 flex items-center justify-between text-xs">
+                  <span style={{ color: '#6a6a80' }}>执行进度</span>
+                  <span style={{ color: '#8b8ba3' }}>
+                    {doneCount}/{totalCount} 项
+                  </span>
+                </div>
+                <div
+                  className="h-1.5 w-full rounded-full overflow-hidden"
+                  style={{ backgroundColor: '#2a2a40' }}
+                >
+                  <div
+                    className="h-full rounded-full transition-all"
+                    style={{
+                      width: `${progress}%`,
+                      backgroundColor:
+                        progress === 100 ? '#33b89a' : '#e2a04a',
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                goToQuotation(booking)
+              }}
+              className="flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs transition-colors hover:bg-white/5"
+              style={{ borderColor: '#2a2a40', color: '#8b8ba3' }}
+            >
+              <FileText size={12} />
+              报价
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                goToChecklist(booking)
+              }}
+              className="flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors"
+              style={{ backgroundColor: '#e2a04a22', color: '#e2a04a' }}
+            >
+              <Clapperboard size={12} />
+              清单
+              <ChevronRight size={12} />
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const renderChecklistSection = (checklist: ChecklistData) => {
+    const doneCount = checklist.tasks.filter((t) => t.status === 'done').length
+    const totalCount = checklist.tasks.length
+    const progress = totalCount > 0 ? (doneCount / totalCount) * 100 : 0
+
+    return (
+      <div className="space-y-3">
+        <h3
+          className="text-sm font-semibold"
+          style={{ fontFamily: "'ZCOOL QingKe HuangYou', cursive", color: '#e2a04a' }}
+        >
+          执行清单
+        </h3>
+        <div
+          className="space-y-3 rounded-xl border p-4"
+          style={{ backgroundColor: '#0f0f1a', borderColor: '#2a2a40' }}
+        >
+          <div>
+            <div className="mb-1.5 flex items-center justify-between text-xs">
+              <span style={{ color: '#6a6a80' }}>整体进度</span>
+              <span style={{ color: '#8b8ba3' }}>
+                {doneCount}/{totalCount} 项
+              </span>
+            </div>
+            <div
+              className="h-2 w-full rounded-full overflow-hidden"
+              style={{ backgroundColor: '#2a2a40' }}
+            >
+              <div
+                className="h-full rounded-full transition-all"
+                style={{
+                  width: `${progress}%`,
+                  backgroundColor:
+                    totalCount > 0 && doneCount === totalCount ? '#33b89a' : '#e2a04a',
+                }}
+              />
+            </div>
+          </div>
+          {(() => {
+            if (totalCount === 0) {
+              return (
+                <div
+                  className="rounded-lg border-l-4 p-3"
+                  style={{
+                    backgroundColor: 'rgba(139, 139, 163, 0.08)',
+                    borderLeftColor: '#8b8ba3',
+                  }}
+                >
+                  <div
+                    className="text-[10px] font-medium uppercase tracking-wide"
+                    style={{ color: '#8b8ba3' }}
+                  >
+                    暂无任务
+                  </div>
+                </div>
+              )
+            }
+            const nextTask = getNextPendingTask(checklist)
+            if (!nextTask) return null
+            return (
+              <div
+                className="rounded-lg border-l-4 p-3"
+                style={{
+                  backgroundColor: 'rgba(226, 160, 74, 0.08)',
+                  borderLeftColor: '#e2a04a',
+                }}
+              >
+                <div
+                  className="mb-1 text-[10px] font-medium uppercase tracking-wide"
+                  style={{ color: '#e2a04a' }}
+                >
+                  下一个待办
+                </div>
+                <div className="flex items-start gap-2">
+                  <Clock
+                    size={14}
+                    className="mt-0.5 flex-shrink-0"
+                    style={{ color: '#e2a04a' }}
+                  />
+                  <div>
+                    <div
+                      className="text-xs font-medium"
+                      style={{ color: '#e2a04a' }}
+                    >
+                      {nextTask.time}
+                    </div>
+                    <div
+                      className="text-sm font-bold mt-0.5"
+                      style={{ color: '#e2e2f0' }}
+                    >
+                      {nextTask.task}
+                    </div>
+                    <div className="text-[11px] mt-1" style={{ color: '#6a6a80' }}>
+                      负责人: {nextTask.assignee}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )
+          })()}
+          <button
+            onClick={() => goToChecklist(selectedBooking!)}
+            className="flex w-full items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-medium transition-colors"
+            style={{ backgroundColor: '#e2a04a22', color: '#e2a04a' }}
+          >
+            <Clapperboard size={14} />
+            打开执行清单
+            <ChevronRight size={14} />
+          </button>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -185,33 +578,22 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="mb-6 grid grid-cols-3 gap-4">
+        <div className="mb-6 grid grid-cols-4 gap-4">
           <div
             className="rounded-xl border p-4"
             style={{ backgroundColor: '#16162a', borderColor: '#2a2a40' }}
           >
             <div className="text-xs" style={{ color: '#8b8ba3' }}>
-              当日订单
-            </div>
-            <div
-              className="mt-1 text-2xl font-bold"
-              style={{ fontFamily: "'ZCOOL QingKe HuangYou', cursive", color: '#e2a04a' }}
-            >
-              {bookingsWithStatus.length} 单
-            </div>
-          </div>
-          <div
-            className="rounded-xl border p-4"
-            style={{ backgroundColor: '#16162a', borderColor: '#2a2a40' }}
-          >
-            <div className="text-xs" style={{ color: '#8b8ba3' }}>
-              预计接待人数
+              订金已收
             </div>
             <div
               className="mt-1 text-2xl font-bold"
               style={{ fontFamily: "'ZCOOL QingKe HuangYou', cursive", color: '#33b89a' }}
             >
-              {totalGuests} 人
+              {paymentStats.depositCount} 单
+            </div>
+            <div className="mt-1 text-xs" style={{ color: '#8b8ba3' }}>
+              合计 ¥{paymentStats.depositTotal}
             </div>
           </div>
           <div
@@ -219,16 +601,44 @@ export default function Dashboard() {
             style={{ backgroundColor: '#16162a', borderColor: '#2a2a40' }}
           >
             <div className="text-xs" style={{ color: '#8b8ba3' }}>
-              任务完成进度
+              尾款待收
             </div>
             <div
               className="mt-1 text-2xl font-bold"
-              style={{
-                fontFamily: "'ZCOOL QingKe HuangYou', cursive",
-                color: totalTasks > 0 && completedTasks === totalTasks ? '#33b89a' : '#e2a04a',
-              }}
+              style={{ fontFamily: "'ZCOOL QingKe HuangYou', cursive", color: '#c84b31' }}
             >
-              {completedTasks}/{totalTasks} 项
+              {paymentStats.finalPendingCount} 单
+            </div>
+            <div className="mt-1 text-xs" style={{ color: '#8b8ba3' }}>
+              待收 ¥{paymentStats.finalPendingTotal}
+            </div>
+          </div>
+          <div
+            className="rounded-xl border p-4"
+            style={{ backgroundColor: '#16162a', borderColor: '#2a2a40' }}
+          >
+            <div className="text-xs" style={{ color: '#8b8ba3' }}>
+              已结清
+            </div>
+            <div
+              className="mt-1 text-2xl font-bold"
+              style={{ fontFamily: "'ZCOOL QingKe HuangYou', cursive", color: '#33b89a' }}
+            >
+              {paymentStats.settledCount} 单
+            </div>
+          </div>
+          <div
+            className="rounded-xl border p-4"
+            style={{ backgroundColor: '#16162a', borderColor: '#2a2a40' }}
+          >
+            <div className="text-xs" style={{ color: '#8b8ba3' }}>
+              当日总营收
+            </div>
+            <div
+              className="mt-1 text-2xl font-bold"
+              style={{ fontFamily: "'ZCOOL QingKe HuangYou', cursive", color: '#e2a04a' }}
+            >
+              ¥{paymentStats.totalRevenue}
             </div>
           </div>
         </div>
@@ -242,59 +652,84 @@ export default function Dashboard() {
               className="text-lg font-bold"
               style={{ fontFamily: "'ZCOOL QingKe HuangYou', cursive", color: '#e2e2f0' }}
             >
-              {formatDate(selectedDate)} 排期
+              {formatDate(selectedDate)} {viewMode === 'schedule' ? '排期' : '收款'}
             </h2>
             <div className="text-xs" style={{ color: '#6a6a80' }}>
-              按时段排序
+              {viewMode === 'schedule' ? '按时段排序' : '按收款状态分组'}
             </div>
           </div>
 
-          <div className="mb-4 flex flex-wrap gap-2">
-            {TAB_FILTERS.map((tab) => {
-              const isActive = activeTab === tab
-              const statusColors = tab !== 'all' ? ORDER_STATUS_COLORS[tab] : null
-              return (
-                <button
-                  key={tab}
-                  onClick={() => setActiveTab(tab)}
-                  className="flex items-center gap-2 rounded-lg border px-3 py-1.5 text-sm transition-all"
-                  style={{
-                    backgroundColor: isActive ? (statusColors ? undefined : '#e2a04a') : 'transparent',
-                    borderColor: isActive
-                      ? statusColors
-                        ? undefined
-                        : '#e2a04a'
-                      : '#2a2a40',
-                    color: isActive ? (statusColors ? undefined : '#0f0f1a') : '#8b8ba3',
-                    ...(isActive && statusColors
-                      ? {
-                          backgroundColor: 'rgba(226, 160, 74, 0.15)',
-                          borderColor: 'rgba(226, 160, 74, 0.5)',
-                          color: '#e2a04a',
-                        }
-                      : {}),
-                  }}
-                >
-                  <span>{getTabLabel(tab)}</span>
-                  <span
-                    className="flex h-5 min-w-[20px] items-center justify-center rounded-full px-1.5 text-xs font-medium"
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <div className="flex flex-wrap gap-2">
+              {viewMode === 'schedule' && TAB_FILTERS.map((tab) => {
+                const isActive = activeTab === tab
+                const statusColors = tab !== 'all' ? ORDER_STATUS_COLORS[tab] : null
+                return (
+                  <button
+                    key={tab}
+                    onClick={() => setActiveTab(tab)}
+                    className="flex items-center gap-2 rounded-lg border px-3 py-1.5 text-sm transition-all"
                     style={{
-                      backgroundColor: isActive
-                        ? tab === 'all'
-                          ? 'rgba(15, 15, 26, 0.3)'
-                          : 'rgba(255,255,255,0.15)'
+                      backgroundColor: isActive ? (statusColors ? undefined : '#e2a04a') : 'transparent',
+                      borderColor: isActive
+                        ? statusColors
+                          ? undefined
+                          : '#e2a04a'
                         : '#2a2a40',
-                      color: isActive ? (tab === 'all' ? '#e2a04a' : '#e2e2f0') : '#6a6a80',
+                      color: isActive ? (statusColors ? undefined : '#0f0f1a') : '#8b8ba3',
+                      ...(isActive && statusColors
+                        ? {
+                            backgroundColor: 'rgba(226, 160, 74, 0.15)',
+                            borderColor: 'rgba(226, 160, 74, 0.5)',
+                            color: '#e2a04a',
+                          }
+                        : {}),
                     }}
                   >
-                    {tabCounts[tab]}
-                  </span>
-                </button>
-              )
-            })}
+                    <span>{getTabLabel(tab)}</span>
+                    <span
+                      className="flex h-5 min-w-[20px] items-center justify-center rounded-full px-1.5 text-xs font-medium"
+                      style={{
+                        backgroundColor: isActive
+                          ? tab === 'all'
+                            ? 'rgba(15, 15, 26, 0.3)'
+                            : 'rgba(255,255,255,0.15)'
+                          : '#2a2a40',
+                        color: isActive ? (tab === 'all' ? '#e2a04a' : '#e2e2f0') : '#6a6a80',
+                      }}
+                    >
+                      {tabCounts[tab]}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+
+            <div className="flex rounded-lg border p-0.5" style={{ borderColor: '#2a2a40' }}>
+              <button
+                onClick={() => setViewMode('schedule')}
+                className="rounded-md px-3 py-1 text-xs font-medium transition-all"
+                style={{
+                  backgroundColor: viewMode === 'schedule' ? '#e2a04a' : 'transparent',
+                  color: viewMode === 'schedule' ? '#0f0f1a' : '#8b8ba3',
+                }}
+              >
+                排期视图
+              </button>
+              <button
+                onClick={() => setViewMode('payment')}
+                className="rounded-md px-3 py-1 text-xs font-medium transition-all"
+                style={{
+                  backgroundColor: viewMode === 'payment' ? '#e2a04a' : 'transparent',
+                  color: viewMode === 'payment' ? '#0f0f1a' : '#8b8ba3',
+                }}
+              >
+                收款视图
+              </button>
+            </div>
           </div>
 
-          {filteredBookings.length === 0 ? (
+          {viewMode === 'schedule' && filteredBookings.length === 0 ? (
             <div className="py-16 text-center">
               <PartyPopper
                 size={48}
@@ -312,188 +747,65 @@ export default function Dashboard() {
                 新建询价
               </button>
             </div>
-          ) : (
+          ) : viewMode === 'schedule' ? (
             <div className="space-y-3">
-              {filteredBookings.map((booking) => {
-                const doneCount = booking.checklist
-                  ? booking.checklist.tasks.filter((t) => t.status === 'done').length
-                  : 0
-                const totalCount = booking.checklist
-                  ? booking.checklist.tasks.length
-                  : 0
-                const progress = totalCount > 0 ? (doneCount / totalCount) * 100 : 0
-                const depositAmount = booking.quotation.depositAmount || 0
-                const showFinalUnpaid =
-                  !booking.quotation.finalPaid &&
-                  (booking.status === 'completed' || booking.status === 'in_progress' || booking.status === 'wrapping_up')
-
+              {filteredBookings.map((booking) => renderOrderCard(booking))}
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {PAYMENT_GROUPS.map((group) => {
+                const bookings = paymentGroupedBookings[group.key]
+                const isExpanded = expandedPaymentGroups[group.key]
                 return (
                   <div
-                    key={booking.quotation.id}
-                    onClick={() => setSelectedBooking(booking)}
-                    className="cursor-pointer rounded-xl border p-4 transition-all hover:border-amber-500/40"
-                    style={{
-                      backgroundColor: '#0f0f1a',
-                      borderColor: '#2a2a40',
-                    }}
+                    key={group.key}
+                    className="rounded-xl border overflow-hidden"
+                    style={{ backgroundColor: '#0f0f1a', borderColor: '#2a2a40' }}
                   >
-                    <div className="flex items-start gap-4">
-                      <div
-                        className="flex-shrink-0 rounded-lg px-3 py-2 text-center"
-                        style={{ backgroundColor: '#e2a04a22' }}
-                      >
-                        <div
-                          className="text-lg font-bold"
+                    <button
+                      onClick={() => togglePaymentGroup(group.key)}
+                      className="flex w-full items-center justify-between px-4 py-3 transition-colors hover:bg-white/5"
+                    >
+                      <div className="flex items-center gap-3">
+                        <ChevronDown
+                          size={16}
+                          style={{
+                            color: group.color,
+                            transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)',
+                            transition: 'transform 0.2s',
+                          }}
+                        />
+                        <span
+                          className="text-sm font-semibold"
                           style={{
                             fontFamily: "'ZCOOL QingKe HuangYou', cursive",
-                            color: '#e2a04a',
+                            color: group.color,
                           }}
                         >
-                          {booking.quotation.timeSlot}
-                        </div>
+                          {group.label}
+                        </span>
+                        <span
+                          className="flex h-5 min-w-[20px] items-center justify-center rounded-full px-1.5 text-xs font-medium"
+                          style={{
+                            backgroundColor: `${group.color}22`,
+                            color: group.color,
+                          }}
+                        >
+                          {bookings.length}
+                        </span>
                       </div>
-
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-3">
-                          <h3
-                            className="text-base font-semibold truncate"
-                            style={{ color: '#e2e2f0' }}
-                          >
-                            {booking.inquiry.customerName}
-                            <span
-                              className="ml-2 text-xs font-normal"
-                              style={{ color: '#6a6a80' }}
-                            >
-                              的生日派对
-                            </span>
-                          </h3>
-                          <span
-                            className="flex-shrink-0 rounded-full border px-2 py-0.5 text-xs"
-                            style={{
-                              backgroundColor: 'rgba(226, 160, 74, 0.1)',
-                              borderColor: 'rgba(226, 160, 74, 0.3)',
-                              color: '#e2a04a',
-                            }}
-                          >
-                            {ORDER_STATUS_LABELS[booking.status]}
-                          </span>
-                        </div>
-
-                        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
-                          <span
-                            className="flex items-center gap-1"
-                            style={{ color: '#8b8ba3' }}
-                          >
-                            <Users size={12} />
-                            {booking.inquiry.guestCount}人
-                          </span>
-                          <span
-                            className="flex items-center gap-1"
-                            style={{ color: '#8b8ba3' }}
-                          >
-                            <Clock size={12} />
-                            {booking.quotation.selectedScripts
-                              .reduce((s, sc) => s + sc.duration, 0)
-                              .toFixed(1)}
-                            小时
-                          </span>
-                          {booking.inquiry.needPrivateRoom && (
-                            <span
-                              className="inline-block rounded px-1.5 py-0.5 text-[10px]"
-                              style={{ backgroundColor: '#33b89a22', color: '#33b89a' }}
-                            >
-                              独立包间
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="mt-2 flex flex-wrap gap-1.5">
-                          {booking.quotation.selectedScripts.map((s) => (
-                            <span
-                              key={s.id}
-                              className="rounded px-2 py-0.5 text-xs"
-                              style={{
-                                backgroundColor: '#2a2a40',
-                                color: '#a0a0b8',
-                              }}
-                            >
-                              {s.name}
-                            </span>
-                          ))}
-                        </div>
-
-                        <div className="mt-2 flex flex-wrap gap-1.5">
-                          {depositAmount > 0 && (
-                            <span
-                              className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px]"
-                              style={{ backgroundColor: '#33b89a22', color: '#33b89a' }}
-                            >
-                              <CheckCircle size={10} />
-                              已收订金 ¥{depositAmount}
-                            </span>
-                          )}
-                          {showFinalUnpaid && (
-                            <span
-                              className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-medium"
-                              style={{ backgroundColor: '#c84b3122', color: '#c84b31' }}
-                            >
-                              <AlertCircle size={10} />
-                              未收尾款
-                            </span>
-                          )}
-                        </div>
-
-                        {booking.checklist && (
-                          <div className="mt-3">
-                            <div className="mb-1 flex items-center justify-between text-xs">
-                              <span style={{ color: '#6a6a80' }}>执行进度</span>
-                              <span style={{ color: '#8b8ba3' }}>
-                                {doneCount}/{totalCount} 项
-                              </span>
-                            </div>
-                            <div
-                              className="h-1.5 w-full rounded-full overflow-hidden"
-                              style={{ backgroundColor: '#2a2a40' }}
-                            >
-                              <div
-                                className="h-full rounded-full transition-all"
-                                style={{
-                                  width: `${progress}%`,
-                                  backgroundColor:
-                                    progress === 100 ? '#33b89a' : '#e2a04a',
-                                }}
-                              />
-                            </div>
+                    </button>
+                    {isExpanded && (
+                      <div className="space-y-3 px-4 pb-4">
+                        {bookings.length === 0 ? (
+                          <div className="py-6 text-center text-xs" style={{ color: '#6a6a80' }}>
+                            暂无订单
                           </div>
+                        ) : (
+                          bookings.map((booking) => renderOrderCard(booking))
                         )}
                       </div>
-
-                      <div className="flex flex-col gap-2">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            goToQuotation(booking)
-                          }}
-                          className="flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs transition-colors hover:bg-white/5"
-                          style={{ borderColor: '#2a2a40', color: '#8b8ba3' }}
-                        >
-                          <FileText size={12} />
-                          报价
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            goToChecklist(booking)
-                          }}
-                          className="flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors"
-                          style={{ backgroundColor: '#e2a04a22', color: '#e2a04a' }}
-                        >
-                          <Clapperboard size={12} />
-                          清单
-                          <ChevronRight size={12} />
-                        </button>
-                      </div>
-                    </div>
+                    )}
                   </div>
                 )
               })}
@@ -515,6 +827,9 @@ export default function Dashboard() {
 
       {selectedBooking && (
         <>
+          <div
+            key={detailKey}
+          />
           <div
             className="fixed inset-0 z-40 transition-opacity duration-300"
             style={{ backgroundColor: 'rgba(0, 0, 0, 0.6)' }}
@@ -716,28 +1031,96 @@ export default function Dashboard() {
                     className="h-px w-full"
                     style={{ backgroundColor: '#2a2a40' }}
                   />
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm" style={{ color: '#8b8ba3' }}>
-                        已收订金
-                      </span>
-                      {selectedBooking.quotation.depositMethod && (
-                        <span
-                          className="rounded px-1.5 py-0.5 text-[10px]"
-                          style={{ backgroundColor: '#2a2a40', color: '#8b8ba3' }}
+                  {isEditingDeposit ? (
+                    <div className="space-y-3">
+                      <div>
+                        <div className="mb-1 text-xs" style={{ color: '#6a6a80' }}>
+                          订金金额
+                        </div>
+                        <input
+                          type="number"
+                          value={editDepositAmount}
+                          onChange={(e) => setEditDepositAmount(Number(e.target.value))}
+                          className="w-full rounded-lg border px-3 py-2 text-sm outline-none"
+                          style={{
+                            backgroundColor: '#16162a',
+                            borderColor: '#2a2a40',
+                            color: '#e2e2f0',
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <div className="mb-1 text-xs" style={{ color: '#6a6a80' }}>
+                          支付方式
+                        </div>
+                        <select
+                          value={editDepositMethod}
+                          onChange={(e) => setEditDepositMethod(e.target.value as PaymentMethod | '')}
+                          className="w-full rounded-lg border px-3 py-2 text-sm outline-none"
+                          style={{
+                            backgroundColor: '#16162a',
+                            borderColor: '#2a2a40',
+                            color: '#e2e2f0',
+                          }}
                         >
-                          {PAYMENT_METHOD_LABELS[selectedBooking.quotation.depositMethod]}
-                        </span>
-                      )}
+                          <option value="">未选择</option>
+                          {(Object.keys(PAYMENT_METHOD_LABELS) as PaymentMethod[]).map((m) => (
+                            <option key={m} value={m}>
+                              {PAYMENT_METHOD_LABELS[m]}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={saveEditDeposit}
+                          className="flex-1 rounded-lg py-2 text-sm font-medium"
+                          style={{ backgroundColor: '#33b89a', color: '#0f0f1a' }}
+                        >
+                          保存
+                        </button>
+                        <button
+                          onClick={() => setIsEditingDeposit(false)}
+                          className="flex-1 rounded-lg border py-2 text-sm font-medium"
+                          style={{ borderColor: '#2a2a40', color: '#8b8ba3' }}
+                        >
+                          取消
+                        </button>
+                      </div>
                     </div>
-                    <span
-                      className="text-sm font-medium flex items-center gap-1"
-                      style={{ color: '#33b89a' }}
-                    >
-                      <CheckCircle size={12} />
-                      ¥{selectedBooking.quotation.depositAmount || 0}
-                    </span>
-                  </div>
+                  ) : (
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm" style={{ color: '#8b8ba3' }}>
+                          已收订金
+                        </span>
+                        {selectedBooking.quotation.depositMethod && (
+                          <span
+                            className="rounded px-1.5 py-0.5 text-[10px]"
+                            style={{ backgroundColor: '#2a2a40', color: '#8b8ba3' }}
+                          >
+                            {PAYMENT_METHOD_LABELS[selectedBooking.quotation.depositMethod]}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="text-sm font-medium flex items-center gap-1"
+                          style={{ color: '#33b89a' }}
+                        >
+                          <CheckCircle size={12} />
+                          ¥{selectedBooking.quotation.depositAmount || 0}
+                        </span>
+                        <button
+                          onClick={startEditDeposit}
+                          className="rounded p-1 transition-colors hover:bg-white/10"
+                          style={{ color: '#8b8ba3' }}
+                        >
+                          <Pencil size={12} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between">
                     <span className="text-sm" style={{ color: '#8b8ba3' }}>
                       尾款金额
@@ -786,6 +1169,66 @@ export default function Dashboard() {
                       </span>
                     )}
                   </div>
+                  {!selectedBooking.quotation.finalPaid && (
+                    <div
+                      className="mt-2 rounded-lg border p-3"
+                      style={{
+                        backgroundColor: 'rgba(200, 75, 49, 0.06)',
+                        borderColor: 'rgba(200, 75, 49, 0.2)',
+                      }}
+                    >
+                      {!showFinalPaymentConfirm ? (
+                        <button
+                          onClick={() => setShowFinalPaymentConfirm(true)}
+                          className="flex w-full items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-semibold transition-colors"
+                          style={{ backgroundColor: '#33b89a', color: '#0f0f1a' }}
+                        >
+                          <CheckCircle size={14} />
+                          标记尾款已收
+                        </button>
+                      ) : (
+                        <div className="space-y-3">
+                          <div>
+                            <div className="mb-1 text-xs" style={{ color: '#6a6a80' }}>
+                              选择支付方式
+                            </div>
+                            <div className="grid grid-cols-3 gap-2">
+                              {(Object.keys(PAYMENT_METHOD_LABELS) as PaymentMethod[]).map((m) => (
+                                <button
+                                  key={m}
+                                  onClick={() => setFinalPaymentMethod(m)}
+                                  className="rounded-lg border px-2 py-1.5 text-xs transition-all"
+                                  style={{
+                                    backgroundColor: finalPaymentMethod === m ? '#33b89a22' : 'transparent',
+                                    borderColor: finalPaymentMethod === m ? '#33b89a' : '#2a2a40',
+                                    color: finalPaymentMethod === m ? '#33b89a' : '#8b8ba3',
+                                  }}
+                                >
+                                  {PAYMENT_METHOD_LABELS[m]}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={handleMarkFinalPaid}
+                              className="flex-1 rounded-lg py-2 text-sm font-semibold"
+                              style={{ backgroundColor: '#33b89a', color: '#0f0f1a' }}
+                            >
+                              确认收款
+                            </button>
+                            <button
+                              onClick={() => setShowFinalPaymentConfirm(false)}
+                              className="flex-1 rounded-lg border py-2 text-sm font-medium"
+                              style={{ borderColor: '#2a2a40', color: '#8b8ba3' }}
+                            >
+                              取消
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -835,93 +1278,7 @@ export default function Dashboard() {
                 </div>
               </div>
 
-              {selectedBooking.checklist && (
-                <div className="space-y-3">
-                  <h3
-                    className="text-sm font-semibold"
-                    style={{ fontFamily: "'ZCOOL QingKe HuangYou', cursive", color: '#e2a04a' }}
-                  >
-                    执行清单
-                  </h3>
-                  <div
-                    className="space-y-3 rounded-xl border p-4"
-                    style={{ backgroundColor: '#0f0f1a', borderColor: '#2a2a40' }}
-                  >
-                    <div>
-                      <div className="mb-1.5 flex items-center justify-between text-xs">
-                        <span style={{ color: '#6a6a80' }}>整体进度</span>
-                        <span style={{ color: '#8b8ba3' }}>
-                          {selectedBooking.checklist.tasks.filter((t) => t.status === 'done').length}/
-                          {selectedBooking.checklist.tasks.length} 项
-                        </span>
-                      </div>
-                      <div
-                        className="h-2 w-full rounded-full overflow-hidden"
-                        style={{ backgroundColor: '#2a2a40' }}
-                      >
-                        <div
-                          className="h-full rounded-full transition-all"
-                          style={{
-                            width: `${
-                              (selectedBooking.checklist.tasks.filter((t) => t.status === 'done').length /
-                                selectedBooking.checklist.tasks.length) *
-                              100
-                            }%`,
-                            backgroundColor:
-                              selectedBooking.checklist.tasks.filter((t) => t.status === 'done').length ===
-                              selectedBooking.checklist.tasks.length
-                                ? '#33b89a'
-                                : '#e2a04a',
-                          }}
-                        />
-                      </div>
-                    </div>
-                    {(() => {
-                      const nextTask = getNextPendingTask(selectedBooking.checklist)
-                      if (!nextTask) return null
-                      return (
-                        <div
-                          className="rounded-lg border-l-4 p-3"
-                          style={{
-                            backgroundColor: 'rgba(226, 160, 74, 0.08)',
-                            borderLeftColor: '#e2a04a',
-                          }}
-                        >
-                          <div className="mb-1 text-[10px] font-medium uppercase tracking-wide" style={{ color: '#e2a04a' }}>
-                            下一个待办
-                          </div>
-                          <div className="flex items-start gap-2">
-                            <Clock size={14} className="mt-0.5 flex-shrink-0" style={{ color: '#e2a04a' }} />
-                            <div>
-                              <div
-                                className="text-xs font-medium"
-                                style={{ color: '#e2a04a' }}
-                              >
-                                {nextTask.time}
-                              </div>
-                              <div className="text-sm font-bold mt-0.5" style={{ color: '#e2e2f0' }}>
-                                {nextTask.task}
-                              </div>
-                              <div className="text-[11px] mt-1" style={{ color: '#6a6a80' }}>
-                                负责人: {nextTask.assignee}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      )
-                    })()}
-                    <button
-                      onClick={() => goToChecklist(selectedBooking)}
-                      className="flex w-full items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-medium transition-colors"
-                      style={{ backgroundColor: '#e2a04a22', color: '#e2a04a' }}
-                    >
-                      <Clapperboard size={14} />
-                      打开执行清单
-                      <ChevronRight size={14} />
-                    </button>
-                  </div>
-                </div>
-              )}
+              {selectedBooking.checklist && renderChecklistSection(selectedBooking.checklist)}
             </div>
 
             <div
