@@ -40,6 +40,7 @@ interface AppState {
   reorderTasks: (checklistId: string, taskIds: string[]) => void
   replaceAllTasks: (checklistId: string, tasks: ChecklistTask[]) => void
   setCurrentChecklistId: (id: string | null) => void
+  transferTasksFromTo: (fromAssignee: string, toAssignee: string, toRole: TaskRole, date?: string) => number
 
   getAvailableScripts: (guestCount: number, ageGroup: string, roomType?: string) => Script[]
   getSuitableRoomType: (guestCount: number) => RoomType | 'mixed'
@@ -47,6 +48,7 @@ interface AppState {
   releaseSlot: (date: string, slot: string) => void
 
   getTodayConfirmed: (date: string) => { inquiry: InquiryData; quotation: QuotationData; checklist?: ChecklistData }[]
+  getTasksForDate: (date: string) => { task: ChecklistTask; checklistId: string; quotationId: string; inquiryId: string }[]
 
   resetAll: () => void
 }
@@ -196,6 +198,39 @@ export const useAppStore = create<AppState>()(
 
       setCurrentChecklistId: (id) => set({ currentChecklistId: id }),
 
+      transferTasksFromTo: (fromAssignee, toAssignee, toRole, date) => {
+        const { checklists, getTasksForDate } = get()
+        const todaysTasks = date ? getTasksForDate(date) : getTasksForDate(new Date().toISOString().slice(0, 10))
+        const checklistUpdates: Record<string, ChecklistTask[]> = {}
+
+        todaysTasks.forEach(({ task, checklistId }) => {
+          if (task.assignee === fromAssignee) {
+            if (!checklistUpdates[checklistId]) {
+              const cl = checklists.find(c => c.id === checklistId)
+              checklistUpdates[checklistId] = cl ? [...cl.tasks] : []
+            }
+            const tasks = checklistUpdates[checklistId]
+            const idx = tasks.findIndex(t => t.id === task.id)
+            if (idx !== -1) {
+              tasks[idx] = { ...tasks[idx], assignee: toAssignee, role: toRole, isCustomEdited: true }
+            }
+          }
+        })
+
+        let count = 0
+        Object.entries(checklistUpdates).forEach(([cid, tasks]) => {
+          count += tasks.filter(t => t.assignee === toAssignee).length
+        })
+
+        set((state) => ({
+          checklists: state.checklists.map((c) =>
+            checklistUpdates[c.id] ? { ...c, tasks: checklistUpdates[c.id] } : c
+          ),
+        }))
+
+        return count
+      },
+
       getAvailableScripts: (guestCount, ageGroup, roomType) => {
         return MOCK_SCRIPTS.filter((script) => {
           const capacityOk = guestCount >= script.minPlayers && guestCount <= script.maxPlayers
@@ -253,6 +288,29 @@ export const useAppStore = create<AppState>()(
             return { inquiry, quotation: q, checklist }
           })
           .filter(Boolean) as { inquiry: InquiryData; quotation: QuotationData; checklist?: ChecklistData }[]
+      },
+
+      getTasksForDate: (date) => {
+        const { quotations, inquiries, checklists } = get()
+        const results: { task: ChecklistTask; checklistId: string; quotationId: string; inquiryId: string }[] = []
+
+        checklists.forEach((cl) => {
+          const quotation = quotations.find((q) => q.id === cl.quotationId)
+          if (!quotation || !quotation.confirmed) return
+          const inquiry = inquiries.find((i) => i.id === quotation.inquiryId)
+          if (!inquiry || inquiry.date !== date) return
+
+          cl.tasks.forEach((task) => {
+            results.push({
+              task,
+              checklistId: cl.id,
+              quotationId: quotation.id,
+              inquiryId: inquiry.id,
+            })
+          })
+        })
+
+        return results
       },
 
       resetAll: () =>

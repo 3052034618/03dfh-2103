@@ -16,6 +16,11 @@ import {
   CheckCircle,
   AlertCircle,
   Pencil,
+  UserPlus,
+  BarChart3,
+  ArrowRightLeft,
+  Copy,
+  Check,
 } from 'lucide-react'
 import { useAppStore } from '@/store/useAppStore'
 import {
@@ -26,9 +31,12 @@ import {
   SCRIPT_TYPE_LABELS,
   DIFFICULTY_LABELS,
   ROOM_TYPE_LABELS,
+  ROLE_LABELS,
+  ROLE_COLORS,
 } from '@/types'
-import type { OrderStatus, InquiryData, QuotationData, ChecklistData, PaymentMethod } from '@/types'
+import type { OrderStatus, InquiryData, QuotationData, ChecklistData, PaymentMethod, TaskRole, Employee, ChecklistTask } from '@/types'
 import { computeOrderStatus, getNextPendingTask } from '@/utils/checklist'
+import { MOCK_EMPLOYEES, getDefaultScheduleForDate } from '@/data/employees'
 
 interface BookingBase {
   inquiry: InquiryData
@@ -41,7 +49,8 @@ interface BookingWithStatus extends BookingBase {
 }
 
 type PaymentGroupKey = 'deposit_received' | 'final_pending' | 'final_paid'
-type ViewMode = 'schedule' | 'payment'
+type ViewMode = 'schedule' | 'payment' | 'staff'
+type StaffRoleKey = 'front_desk' | 'dm' | 'logistics'
 
 const TAB_FILTERS: (OrderStatus | 'all')[] = [
   'all',
@@ -52,14 +61,29 @@ const TAB_FILTERS: (OrderStatus | 'all')[] = [
 ]
 
 const PAYMENT_GROUPS: { key: PaymentGroupKey; label: string; color: string }[] = [
-  { key: 'deposit_received', label: '订金已收', color: '#e2a04a' },
+  { key: 'deposit_received', label: '订金已收', color: '#33b89a' },
   { key: 'final_pending', label: '尾款待收', color: '#c84b31' },
   { key: 'final_paid', label: '已结清', color: '#33b89a' },
 ]
 
+const STAFF_ROLES: { key: StaffRoleKey; label: string; color: string }[] = [
+  { key: 'front_desk', label: '前台', color: '#3b82f6' },
+  { key: 'dm', label: 'DM', color: '#e2a04a' },
+  { key: 'logistics', label: '后勤', color: '#33b89a' },
+]
+
+const SHIFT_LABELS: Record<string, string> = {
+  morning: '早班',
+  afternoon: '中班',
+  evening: '晚班',
+  all: '全天',
+}
+
 export default function Dashboard() {
   const navigate = useNavigate()
   const getTodayConfirmed = useAppStore((s) => s.getTodayConfirmed)
+  const getTasksForDate = useAppStore((s) => s.getTasksForDate)
+  const transferTasksFromTo = useAppStore((s) => s.transferTasksFromTo)
   const setCurrentInquiryId = useAppStore((s) => s.setCurrentInquiryId)
   const setCurrentQuotationId = useAppStore((s) => s.setCurrentQuotationId)
   const setCurrentChecklistId = useAppStore((s) => s.setCurrentChecklistId)
@@ -74,12 +98,17 @@ export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<OrderStatus | 'all'>('all')
   const [viewMode, setViewMode] = useState<ViewMode>('schedule')
   const [selectedBooking, setSelectedBooking] = useState<BookingWithStatus | null>(null)
-  const [detailKey, setDetailKey] = useState(0)
 
   const [expandedPaymentGroups, setExpandedPaymentGroups] = useState<Record<PaymentGroupKey, boolean>>({
     deposit_received: true,
     final_pending: true,
     final_paid: true,
+  })
+
+  const [expandedStaffGroups, setExpandedStaffGroups] = useState<Record<StaffRoleKey, boolean>>({
+    front_desk: true,
+    dm: true,
+    logistics: true,
   })
 
   const [finalPaymentMethod, setFinalPaymentMethod] = useState<PaymentMethod>('wechat')
@@ -89,9 +118,20 @@ export default function Dashboard() {
   const [editDepositAmount, setEditDepositAmount] = useState<number>(0)
   const [editDepositMethod, setEditDepositMethod] = useState<PaymentMethod | ''>('')
 
+  const [showReviewModal, setShowReviewModal] = useState(false)
+  const [reviewCopied, setReviewCopied] = useState(false)
+  const [reviewText, setReviewText] = useState('')
+
+  const [showTransferModal, setShowTransferModal] = useState(false)
+  const [transferFromEmp, setTransferFromEmp] = useState<Employee | null>(null)
+  const [transferToName, setTransferToName] = useState('')
+  const [transferToRole, setTransferToRole] = useState<TaskRole>('logistics')
+
+  const [refreshKey, setRefreshKey] = useState(0)
+
   const todayBookings: BookingBase[] = useMemo(
     () => getTodayConfirmed(selectedDate) as BookingBase[],
-    [getTodayConfirmed, selectedDate]
+    [getTodayConfirmed, selectedDate, refreshKey]
   )
 
   const bookingsWithStatus: BookingWithStatus[] = useMemo(
@@ -101,6 +141,16 @@ export default function Dashboard() {
         status: computeOrderStatus(b.checklist, b.quotation),
       })),
     [todayBookings]
+  )
+
+  const todayTasks = useMemo(
+    () => getTasksForDate(selectedDate),
+    [getTasksForDate, selectedDate, refreshKey]
+  )
+
+  const schedule = useMemo(
+    () => getDefaultScheduleForDate(selectedDate),
+    [selectedDate]
   )
 
   const tabCounts = useMemo(() => {
@@ -137,7 +187,7 @@ export default function Dashboard() {
 
       if (b.quotation.finalPaid) {
         settledCount++
-      } else if (b.quotation.confirmed) {
+      } else if (b.quotation.confirmed && deposit > 0) {
         finalPendingCount++
         finalPendingTotal += total - deposit
       }
@@ -152,6 +202,39 @@ export default function Dashboard() {
       totalRevenue,
     }
   }, [bookingsWithStatus])
+
+  const staffData = useMemo(() => {
+    const result: Record<StaffRoleKey, {
+      employee: Employee
+      shift: string
+      tasks: { task: ChecklistTask; booking: BookingWithStatus }[]
+    }[]> = {
+      front_desk: [],
+      dm: [],
+      logistics: [],
+    }
+
+    schedule.forEach((entry) => {
+      const emp = MOCK_EMPLOYEES.find((e) => e.id === entry.employeeId)
+      if (!emp) return
+
+      const empTasks = todayTasks
+        .filter((t) => t.task.assignee === emp.name)
+        .map((t) => {
+          const booking = bookingsWithStatus.find((b) => b.inquiry.id === t.inquiryId)
+          return { task: t.task, booking: booking! }
+        })
+        .filter((x) => x.booking)
+
+      result[emp.role].push({
+        employee: emp,
+        shift: entry.shift,
+        tasks: empTasks,
+      })
+    })
+
+    return result
+  }, [schedule, todayTasks, bookingsWithStatus])
 
   const filteredBookings = useMemo(() => {
     const filtered =
@@ -171,9 +254,10 @@ export default function Dashboard() {
     }
 
     bookingsWithStatus.forEach((b) => {
+      const deposit = b.quotation.depositAmount || 0
       if (b.quotation.finalPaid) {
         groups.final_paid.push(b)
-      } else if (b.quotation.depositAmount && b.quotation.depositAmount > 0) {
+      } else if (deposit > 0) {
         groups.final_pending.push(b)
       } else {
         groups.deposit_received.push(b)
@@ -219,11 +303,18 @@ export default function Dashboard() {
     setExpandedPaymentGroups((prev) => ({ ...prev, [key]: !prev[key] }))
   }
 
+  const toggleStaffGroup = (key: StaffRoleKey) => {
+    setExpandedStaffGroups((prev) => ({ ...prev, [key]: !prev[key] }))
+  }
+
   const handleMarkFinalPaid = () => {
     if (!selectedBooking) return
     markFinalPaid(selectedBooking.quotation.id, finalPaymentMethod)
     setShowFinalPaymentConfirm(false)
-    setDetailKey((k) => k + 1)
+    setSelectedBooking((prev) =>
+      prev ? { ...prev, quotation: { ...prev.quotation, finalPaid: true, finalPaymentMethod } } : null
+    )
+    setRefreshKey((k) => k + 1)
   }
 
   const startEditDeposit = () => {
@@ -240,7 +331,91 @@ export default function Dashboard() {
       depositMethod: editDepositMethod,
     })
     setIsEditingDeposit(false)
-    setDetailKey((k) => k + 1)
+    setRefreshKey((k) => k + 1)
+    setSelectedBooking((prev) =>
+      prev ? { ...prev, quotation: { ...prev.quotation, depositAmount: editDepositAmount, depositMethod: editDepositMethod } } : null
+    )
+  }
+
+  const generateReviewText = () => {
+    const date = formatDate(selectedDate)
+    const totalOrders = bookingsWithStatus.length
+    const totalRevenue = paymentStats.totalRevenue
+    const depositTotal = paymentStats.depositTotal
+    const finalPending = paymentStats.finalPendingTotal
+    const settled = paymentStats.settledCount
+    const completed = tabCounts.completed
+    const inProgress = tabCounts.in_progress + tabCounts.wrapping_up
+    const notStarted = tabCounts.not_started
+
+    const notes: string[] = []
+    bookingsWithStatus.forEach((b) => {
+      if (b.inquiry.notes) {
+        notes.push(`${b.inquiry.customerName}: ${b.inquiry.notes}`)
+      }
+    })
+
+    const text = `【${date} 晚间复盘】
+
+📊 今日数据
+• 总订单: ${totalOrders} 单
+• 总营收: ¥${totalRevenue}
+• 已收订金: ¥${depositTotal}
+• 未收尾款: ¥${finalPending}
+• 已结清: ${settled} 单
+
+✅ 完成情况
+• 已完成: ${completed} 单
+• 进行中: ${inProgress} 单
+• 未开始: ${notStarted} 单
+
+${notes.length > 0 ? `📝 客户需求
+${notes.map((n) => `• ${n}`).join('\n')}
+
+` : ''}💰 收款情况
+• 订金已收: ${paymentStats.depositCount} 单
+• 尾款待收: ${paymentStats.finalPendingCount} 单
+• 已结清: ${settled} 单`
+
+    setReviewText(text)
+  }
+
+  const copyReview = async () => {
+    try {
+      await navigator.clipboard.writeText(reviewText)
+      setReviewCopied(true)
+      setTimeout(() => setReviewCopied(false), 2000)
+    } catch (e) {
+      const ta = document.createElement('textarea')
+      ta.value = reviewText
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+      setReviewCopied(true)
+      setTimeout(() => setReviewCopied(false), 2000)
+    }
+  }
+
+  const openTransferModal = (emp: Employee) => {
+    setTransferFromEmp(emp)
+    setTransferToName('')
+    setTransferToRole(emp.role)
+    setShowTransferModal(true)
+  }
+
+  const confirmTransfer = () => {
+    if (!transferFromEmp || !transferToName.trim()) return
+    const count = transferTasksFromTo(
+      transferFromEmp.name,
+      transferToName.trim(),
+      transferToRole,
+      selectedDate
+    )
+    alert(`已成功将 ${transferFromEmp.name} 的 ${count} 条任务转交给 ${transferToName}`)
+    setShowTransferModal(false)
+    setTransferFromEmp(null)
+    setRefreshKey((k) => k + 1)
   }
 
   const renderOrderCard = (booking: BookingWithStatus) => {
@@ -368,6 +543,15 @@ export default function Dashboard() {
                 >
                   <AlertCircle size={10} />
                   未收尾款
+                </span>
+              )}
+              {booking.quotation.finalPaid && (
+                <span
+                  className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-medium"
+                  style={{ backgroundColor: '#33b89a22', color: '#33b89a' }}
+                >
+                  <CheckCircle size={10} />
+                  已结清
                 </span>
               )}
             </div>
@@ -541,6 +725,143 @@ export default function Dashboard() {
     )
   }
 
+  const renderStaffCard = (role: StaffRoleKey) => {
+    const group = STAFF_ROLES.find((g) => g.key === role)!
+    const staffList = staffData[role]
+    const isExpanded = expandedStaffGroups[role]
+
+    return (
+      <div
+        key={role}
+        className="rounded-xl border overflow-hidden"
+        style={{ backgroundColor: '#0f0f1a', borderColor: '#2a2a40' }}
+      >
+        <button
+          onClick={() => toggleStaffGroup(role)}
+          className="flex w-full items-center justify-between px-4 py-3 transition-colors hover:bg-white/5"
+        >
+          <div className="flex items-center gap-3">
+            <ChevronDown
+              size={16}
+              style={{
+                color: group.color,
+                transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)',
+                transition: 'transform 0.2s',
+              }}
+            />
+            <span
+              className="text-sm font-semibold"
+              style={{
+                fontFamily: "'ZCOOL QingKe HuangYou', cursive",
+                color: group.color,
+              }}
+            >
+              {group.label}
+            </span>
+            <span
+              className="flex h-5 min-w-[20px] items-center justify-center rounded-full px-1.5 text-xs font-medium"
+              style={{
+                backgroundColor: `${group.color}22`,
+                color: group.color,
+              }}
+            >
+              {staffList.length} 人
+            </span>
+          </div>
+        </button>
+        {isExpanded && (
+          <div className="space-y-3 px-4 pb-4">
+            {staffList.length === 0 ? (
+              <div className="py-6 text-center text-xs" style={{ color: '#6a6a80' }}>
+                今天该岗位没有人排班
+              </div>
+            ) : (
+              staffList.map(({ employee, shift, tasks }) => (
+                <div
+                  key={employee.id}
+                  className="rounded-lg border p-3"
+                  style={{ backgroundColor: '#16162a', borderColor: '#2a2a40' }}
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-center gap-3">
+                      <div
+                        className="flex h-9 w-9 items-center justify-center rounded-lg"
+                        style={{ backgroundColor: `${group.color}22` }}
+                      >
+                        <UserPlus size={16} style={{ color: group.color }} />
+                      </div>
+                      <div>
+                        <div
+                          className="text-sm font-semibold"
+                          style={{ color: '#e2e2f0' }}
+                        >
+                          {employee.name}
+                        </div>
+                        <div className="flex items-center gap-2 text-[11px] mt-0.5">
+                          <span
+                            className="rounded px-1.5 py-0.5"
+                            style={{ backgroundColor: `${group.color}22`, color: group.color }}
+                          >
+                            {SHIFT_LABELS[shift]}
+                          </span>
+                          <span style={{ color: '#6a6a80' }}>
+                            {tasks.length} 项任务
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => openTransferModal(employee)}
+                      className="flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] transition-colors hover:bg-white/5"
+                      style={{ borderColor: '#2a2a40', color: '#e2a04a' }}
+                    >
+                      <ArrowRightLeft size={10} />
+                      转派
+                    </button>
+                  </div>
+
+                  {tasks.length > 0 && (
+                    <div className="mt-3 space-y-1.5">
+                      {tasks.map(({ task, booking }) => (
+                        <div
+                          key={task.id}
+                          className="flex items-center gap-2 rounded px-2 py-1.5 text-[11px]"
+                          style={{ backgroundColor: '#0f0f1a' }}
+                        >
+                          <span
+                            className="flex-shrink-0 font-mono text-xs"
+                            style={{ color: '#e2a04a' }}
+                          >
+                            {task.time}
+                          </span>
+                          <span
+                            className="flex-1 truncate"
+                            style={{ color: '#c0c0d4' }}
+                          >
+                            {task.task}
+                          </span>
+                          <span
+                            className="flex-shrink-0 text-[10px] rounded px-1 py-0.5"
+                            style={{
+                              backgroundColor: task.status === 'done' ? '#33b89a22' : '#e2a04a22',
+                              color: task.status === 'done' ? '#33b89a' : '#e2a04a',
+                            }}
+                          >
+                            {booking.inquiry.customerName}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div
       className="min-h-screen p-6"
@@ -557,10 +878,21 @@ export default function Dashboard() {
               今日包场总览
             </h1>
             <p className="mt-2 text-sm" style={{ color: '#8b8ba3' }}>
-              查看当天所有生日包场订单及执行进度
+              查看当天所有生日包场订单、执行进度及收款情况
             </p>
           </div>
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => {
+                generateReviewText()
+                setShowReviewModal(true)
+              }}
+              className="flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium transition-colors hover:bg-white/5"
+              style={{ borderColor: '#2a2a40', color: '#e2a04a' }}
+            >
+              <BarChart3 size={14} />
+              晚间复盘
+            </button>
             <div className="flex items-center gap-2">
               <Calendar size={16} style={{ color: '#8b8ba3' }} />
               <input
@@ -652,10 +984,11 @@ export default function Dashboard() {
               className="text-lg font-bold"
               style={{ fontFamily: "'ZCOOL QingKe HuangYou', cursive", color: '#e2e2f0' }}
             >
-              {formatDate(selectedDate)} {viewMode === 'schedule' ? '排期' : '收款'}
+              {formatDate(selectedDate)}{' '}
+              {viewMode === 'schedule' ? '排期' : viewMode === 'payment' ? '收款' : '排班'}
             </h2>
             <div className="text-xs" style={{ color: '#6a6a80' }}>
-              {viewMode === 'schedule' ? '按时段排序' : '按收款状态分组'}
+              {viewMode === 'schedule' ? '按时段排序' : viewMode === 'payment' ? '按收款状态分组' : '按岗位分组'}
             </div>
           </div>
 
@@ -708,23 +1041,36 @@ export default function Dashboard() {
             <div className="flex rounded-lg border p-0.5" style={{ borderColor: '#2a2a40' }}>
               <button
                 onClick={() => setViewMode('schedule')}
-                className="rounded-md px-3 py-1 text-xs font-medium transition-all"
+                className="flex items-center gap-1 rounded-md px-3 py-1 text-xs font-medium transition-all"
                 style={{
                   backgroundColor: viewMode === 'schedule' ? '#e2a04a' : 'transparent',
                   color: viewMode === 'schedule' ? '#0f0f1a' : '#8b8ba3',
                 }}
               >
+                <Calendar size={12} />
                 排期视图
               </button>
               <button
                 onClick={() => setViewMode('payment')}
-                className="rounded-md px-3 py-1 text-xs font-medium transition-all"
+                className="flex items-center gap-1 rounded-md px-3 py-1 text-xs font-medium transition-all"
                 style={{
                   backgroundColor: viewMode === 'payment' ? '#e2a04a' : 'transparent',
                   color: viewMode === 'payment' ? '#0f0f1a' : '#8b8ba3',
                 }}
               >
+                <DollarSign size={12} />
                 收款视图
+              </button>
+              <button
+                onClick={() => setViewMode('staff')}
+                className="flex items-center gap-1 rounded-md px-3 py-1 text-xs font-medium transition-all"
+                style={{
+                  backgroundColor: viewMode === 'staff' ? '#e2a04a' : 'transparent',
+                  color: viewMode === 'staff' ? '#0f0f1a' : '#8b8ba3',
+                }}
+              >
+                <Users size={12} />
+                排班视图
               </button>
             </div>
           </div>
@@ -751,7 +1097,7 @@ export default function Dashboard() {
             <div className="space-y-3">
               {filteredBookings.map((booking) => renderOrderCard(booking))}
             </div>
-          ) : (
+          ) : viewMode === 'payment' ? (
             <div className="space-y-4">
               {PAYMENT_GROUPS.map((group) => {
                 const bookings = paymentGroupedBookings[group.key]
@@ -810,6 +1156,10 @@ export default function Dashboard() {
                 )
               })}
             </div>
+          ) : (
+            <div className="space-y-4">
+              {STAFF_ROLES.map((r) => renderStaffCard(r.key))}
+            </div>
           )}
         </div>
 
@@ -827,9 +1177,6 @@ export default function Dashboard() {
 
       {selectedBooking && (
         <>
-          <div
-            key={detailKey}
-          />
           <div
             className="fixed inset-0 z-40 transition-opacity duration-300"
             style={{ backgroundColor: 'rgba(0, 0, 0, 0.6)' }}
@@ -1300,6 +1647,164 @@ export default function Dashboard() {
               >
                 <Clapperboard size={14} />
                 打开执行清单
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {showReviewModal && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            style={{ backgroundColor: 'rgba(0, 0, 0, 0.6)' }}
+            onClick={() => setShowReviewModal(false)}
+          />
+          <div
+            className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-2xl border p-6 shadow-2xl"
+            style={{ backgroundColor: '#16162a', borderColor: '#2a2a40' }}
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <h2
+                className="text-xl font-bold"
+                style={{ fontFamily: "'ZCOOL QingKe HuangYou', cursive", color: '#e2a04a' }}
+              >
+                <BarChart3 className="mb-1 mr-2 inline-block" size={20} />
+                晚间复盘
+              </h2>
+              <button
+                onClick={() => setShowReviewModal(false)}
+                className="flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-white/5"
+                style={{ color: '#8b8ba3' }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div
+              className="whitespace-pre-wrap rounded-xl border p-4 text-sm leading-relaxed"
+              style={{ backgroundColor: '#0f0f1a', borderColor: '#2a2a40', color: '#c0c0d4' }}
+            >
+              {reviewText}
+            </div>
+            <div className="mt-4 flex gap-2">
+              <button
+                onClick={copyReview}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2.5 text-sm font-semibold transition-all hover:opacity-90"
+                style={{ backgroundColor: '#e2a04a', color: '#0f0f1a' }}
+              >
+                {reviewCopied ? <Check size={14} /> : <Copy size={14} />}
+                {reviewCopied ? '已复制' : '复制到剪贴板'}
+              </button>
+              <button
+                onClick={() => setShowReviewModal(false)}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border py-2.5 text-sm font-medium transition-colors hover:bg-white/5"
+                style={{ borderColor: '#2a2a40', color: '#e2e2f0' }}
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {showTransferModal && transferFromEmp && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            style={{ backgroundColor: 'rgba(0, 0, 0, 0.6)' }}
+            onClick={() => setShowTransferModal(false)}
+          />
+          <div
+            className="fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-2xl border p-6 shadow-2xl"
+            style={{ backgroundColor: '#16162a', borderColor: '#2a2a40' }}
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <h2
+                className="text-xl font-bold"
+                style={{ fontFamily: "'ZCOOL QingKe HuangYou', cursive", color: '#e2a04a' }}
+              >
+                <ArrowRightLeft className="mb-1 mr-2 inline-block" size={20} />
+                批量转派任务
+              </h2>
+              <button
+                onClick={() => setShowTransferModal(false)}
+                className="flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-white/5"
+                style={{ color: '#8b8ba3' }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div
+                className="rounded-xl border p-3"
+                style={{ backgroundColor: '#0f0f1a', borderColor: '#2a2a40' }}
+              >
+                <div className="text-xs mb-1" style={{ color: '#6a6a80' }}>
+                  转出人员
+                </div>
+                <div className="text-sm font-semibold" style={{ color: '#e2e2f0' }}>
+                  {transferFromEmp.name}
+                  <span
+                    className="ml-2 rounded px-1.5 py-0.5 text-[10px]"
+                    style={{ backgroundColor: ROLE_COLORS[transferFromEmp.role] + '22', color: ROLE_COLORS[transferFromEmp.role] }}
+                  >
+                    {ROLE_LABELS[transferFromEmp.role]}
+                  </span>
+                </div>
+              </div>
+              <div>
+                <div className="text-xs mb-1" style={{ color: '#6a6a80' }}>
+                  接收人姓名
+                </div>
+                <input
+                  type="text"
+                  value={transferToName}
+                  onChange={(e) => setTransferToName(e.target.value)}
+                  placeholder="请输入接收人姓名"
+                  className="w-full rounded-lg border px-3 py-2 text-sm outline-none"
+                  style={{
+                    backgroundColor: '#16162a',
+                    borderColor: '#2a2a40',
+                    color: '#e2e2f0',
+                  }}
+                />
+              </div>
+              <div>
+                <div className="text-xs mb-1" style={{ color: '#6a6a80' }}>
+                  接收人角色
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {(Object.keys(ROLE_LABELS) as TaskRole[]).map((r) => (
+                    <button
+                      key={r}
+                      onClick={() => setTransferToRole(r)}
+                      className="rounded-lg border px-2 py-1.5 text-xs transition-all"
+                      style={{
+                        backgroundColor: transferToRole === r ? ROLE_COLORS[r] + '22' : 'transparent',
+                        borderColor: transferToRole === r ? ROLE_COLORS[r] : '#2a2a40',
+                        color: transferToRole === r ? ROLE_COLORS[r] : '#8b8ba3',
+                      }}
+                    >
+                      {ROLE_LABELS[r]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="mt-6 flex gap-2">
+              <button
+                onClick={confirmTransfer}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2.5 text-sm font-semibold transition-all hover:opacity-90"
+                style={{ backgroundColor: '#e2a04a', color: '#0f0f1a' }}
+              >
+                确认转派
+              </button>
+              <button
+                onClick={() => setShowTransferModal(false)}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border py-2.5 text-sm font-medium transition-colors hover:bg-white/5"
+                style={{ borderColor: '#2a2a40', color: '#e2e2f0' }}
+              >
+                取消
               </button>
             </div>
           </div>

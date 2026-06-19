@@ -8,6 +8,20 @@ export type TaskStatus = 'pending' | 'in_progress' | 'done'
 export type PaymentMethod = 'cash' | 'wechat' | 'alipay' | 'card' | 'bank'
 export type PaymentStatus = 'unpaid' | 'partial' | 'paid'
 export type OrderStatus = 'not_started' | 'in_progress' | 'completed' | 'wrapping_up'
+export type ViewMode = 'schedule' | 'payment' | 'staff'
+
+export interface Employee {
+  id: string
+  name: string
+  role: TaskRole
+  phone: string
+  avatar?: string
+}
+
+export interface ScheduleEntry {
+  employeeId: string
+  shift: 'morning' | 'afternoon' | 'evening' | 'all'
+}
 
 export interface Script {
   id: string
