@@ -1,10 +1,12 @@
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom'
-import { Clapperboard, ClipboardList, FileText, PartyPopper } from 'lucide-react'
+import { Clapperboard, ClipboardList, FileText, PartyPopper, LayoutDashboard } from 'lucide-react'
+import Dashboard from '@/pages/Dashboard'
 import Inquiry from '@/pages/Inquiry'
 import Quotation from '@/pages/Quotation'
 import Checklist from '@/pages/Checklist'
 
 const NAV_ITEMS = [
+  { path: '/dashboard', label: '今日总览', icon: LayoutDashboard },
   { path: '/inquiry', label: '询价录入', icon: ClipboardList },
   { path: '/quotation', label: '套餐报价', icon: FileText },
   { path: '/checklist', label: '执行清单', icon: Clapperboard },
@@ -53,10 +55,11 @@ function AppLayout() {
       <TopNav />
       <main className="pt-16 min-h-screen">
         <Routes>
+          <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/inquiry" element={<Inquiry />} />
           <Route path="/quotation" element={<Quotation />} />
           <Route path="/checklist" element={<Checklist />} />
-          <Route path="/" element={<Navigate to="/inquiry" replace />} />
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </main>
     </div>

@@ -1,9 +1,21 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { CheckCircle2, Circle, Loader, Printer, Plus, ArrowLeft } from 'lucide-react'
+import {
+  CheckCircle2,
+  Circle,
+  Loader,
+  Printer,
+  Plus,
+  ArrowLeft,
+  Pencil,
+  Trash2,
+  RefreshCw,
+  Check,
+  X,
+} from 'lucide-react'
 import { useAppStore } from '@/store/useAppStore'
 import { ROLE_LABELS, ROLE_COLORS } from '@/types'
-import type { TaskStatus } from '@/types'
+import type { TaskStatus, TaskRole, ChecklistTask } from '@/types'
 import { generateChecklistTasks } from '@/utils/checklist'
 
 const STATUS_CYCLE: TaskStatus[] = ['pending', 'in_progress', 'done']
@@ -26,6 +38,19 @@ const STATUS_CIRCLE_RING: Record<TaskStatus, string> = {
   done: 'border-[#33b89a]',
 }
 
+const ROLE_OPTIONS: { value: TaskRole; label: string }[] = [
+  { value: 'front_desk', label: '前台' },
+  { value: 'dm', label: 'DM' },
+  { value: 'logistics', label: '后勤' },
+]
+
+interface EditFormState {
+  time: string
+  task: string
+  assignee: string
+  role: TaskRole
+}
+
 export default function Checklist() {
   const navigate = useNavigate()
   const currentQuotationId = useAppStore((s) => s.currentQuotationId)
@@ -34,6 +59,26 @@ export default function Checklist() {
   const checklists = useAppStore((s) => s.checklists)
   const addChecklist = useAppStore((s) => s.addChecklist)
   const updateTaskStatus = useAppStore((s) => s.updateTaskStatus)
+  const updateTask = useAppStore((s) => s.updateTask)
+  const addTask = useAppStore((s) => s.addTask)
+  const deleteTask = useAppStore((s) => s.deleteTask)
+  const setCurrentQuotationId = useAppStore((s) => s.setCurrentQuotationId)
+
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null)
+  const [editForm, setEditForm] = useState<EditFormState>({
+    time: '',
+    task: '',
+    assignee: '',
+    role: 'front_desk',
+  })
+  const [showRegenerateConfirm, setShowRegenerateConfirm] = useState(false)
+  const [isAddingNew, setIsAddingNew] = useState(false)
+  const [newTaskForm, setNewTaskForm] = useState<EditFormState>({
+    time: '00:00',
+    task: '',
+    assignee: '',
+    role: 'front_desk',
+  })
 
   const quotation = useMemo(
     () => quotations.find((q) => q.id === currentQuotationId),
@@ -70,10 +115,95 @@ export default function Checklist() {
   )
 
   const handleCycleStatus = (taskId: string, current: TaskStatus) => {
-    if (!checklist) return
+    if (!checklist || editingTaskId === taskId) return
     const idx = STATUS_CYCLE.indexOf(current)
     const next = STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length]
     updateTaskStatus(checklist.id, taskId, next)
+  }
+
+  const handleStartEdit = (task: ChecklistTask) => {
+    setEditingTaskId(task.id)
+    setEditForm({
+      time: task.time,
+      task: task.task,
+      assignee: task.assignee,
+      role: task.role,
+    })
+    setIsAddingNew(false)
+  }
+
+  const handleSaveEdit = () => {
+    if (!checklist || !editingTaskId) return
+    updateTask(checklist.id, editingTaskId, {
+      time: editForm.time,
+      task: editForm.task,
+      assignee: editForm.assignee,
+      role: editForm.role,
+    })
+    setEditingTaskId(null)
+  }
+
+  const handleCancelEdit = () => {
+    setEditingTaskId(null)
+  }
+
+  const handleDeleteTask = (taskId: string) => {
+    if (!checklist) return
+    if (editingTaskId === taskId) {
+      setEditingTaskId(null)
+    }
+    deleteTask(checklist.id, taskId)
+  }
+
+  const handleStartAdd = () => {
+    setIsAddingNew(true)
+    setEditingTaskId(null)
+    setNewTaskForm({
+      time: '00:00',
+      task: '',
+      assignee: '',
+      role: 'front_desk',
+    })
+  }
+
+  const handleSaveNew = () => {
+    if (!checklist || !newTaskForm.task.trim()) return
+    addTask(checklist.id, {
+      time: newTaskForm.time,
+      task: newTaskForm.task,
+      assignee: newTaskForm.assignee || '未指派',
+      role: newTaskForm.role,
+      status: 'pending',
+    })
+    setIsAddingNew(false)
+  }
+
+  const handleCancelAdd = () => {
+    setIsAddingNew(false)
+  }
+
+  const handleRegenerate = () => {
+    if (!quotation || !inquiry || !checklist) return
+    const newTasks = generateChecklistTasks(inquiry, quotation.selectedScripts)
+    const checklistId = checklist.id
+    checklist.tasks.forEach((t) => deleteTask(checklistId, t.id))
+    newTasks.forEach((t) => {
+      addTask(checklistId, {
+        time: t.time,
+        task: t.task,
+        assignee: t.assignee,
+        role: t.role,
+        status: t.status,
+      })
+    })
+    setShowRegenerateConfirm(false)
+  }
+
+  const handleGoToQuotation = () => {
+    if (currentQuotationId) {
+      setCurrentQuotationId(currentQuotationId)
+    }
+    navigate('/quotation')
   }
 
   const doneCount = checklist?.tasks.filter((t) => t.status === 'done').length ?? 0
@@ -178,20 +308,109 @@ export default function Checklist() {
             <div className="flex flex-col gap-1">
               {checklist.tasks.map((task) => {
                 const Icon = STATUS_ICON[task.status]
+                const isEditing = editingTaskId === task.id
+
+                if (isEditing) {
+                  return (
+                    <div
+                      key={task.id}
+                      className="relative flex items-start gap-4 py-3 px-2 -mx-2 rounded-lg bg-white/5"
+                    >
+                      <div
+                        className={`relative z-10 mt-0.5 flex items-center justify-center w-[23px] h-[23px] rounded-full border-2 bg-[#0f0f1a] print:bg-white ${STATUS_CIRCLE_RING[task.status]}`}
+                      >
+                        <Icon
+                          size={12}
+                          className={`${STATUS_COLOR[task.status]} ${task.status === 'in_progress' ? 'animate-spin' : ''}`}
+                        />
+                      </div>
+
+                      <div className="flex-1 min-w-0 space-y-3">
+                        <div className="flex flex-wrap gap-3">
+                          <div className="flex-1 min-w-[100px] max-w-[140px]">
+                            <label className="text-[11px] text-gray-500 block mb-1">时间</label>
+                            <input
+                              type="text"
+                              value={editForm.time}
+                              onChange={(e) => setEditForm({ ...editForm, time: e.target.value })}
+                              className="w-full px-2.5 py-1.5 text-sm rounded bg-white/5 border border-white/10 text-white focus:outline-none focus:border-[#e2a04a]"
+                              placeholder="HH:MM"
+                            />
+                          </div>
+                          <div className="flex-1 min-w-[200px]">
+                            <label className="text-[11px] text-gray-500 block mb-1">任务内容</label>
+                            <input
+                              type="text"
+                              value={editForm.task}
+                              onChange={(e) => setEditForm({ ...editForm, task: e.target.value })}
+                              className="w-full px-2.5 py-1.5 text-sm rounded bg-white/5 border border-white/10 text-white focus:outline-none focus:border-[#e2a04a]"
+                              placeholder="任务内容"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-3">
+                          <div className="flex-1 min-w-[120px]">
+                            <label className="text-[11px] text-gray-500 block mb-1">负责人</label>
+                            <input
+                              type="text"
+                              value={editForm.assignee}
+                              onChange={(e) => setEditForm({ ...editForm, assignee: e.target.value })}
+                              className="w-full px-2.5 py-1.5 text-sm rounded bg-white/5 border border-white/10 text-white focus:outline-none focus:border-[#e2a04a]"
+                              placeholder="负责人姓名"
+                            />
+                          </div>
+                          <div className="flex-1 min-w-[100px] max-w-[140px]">
+                            <label className="text-[11px] text-gray-500 block mb-1">角色</label>
+                            <select
+                              value={editForm.role}
+                              onChange={(e) => setEditForm({ ...editForm, role: e.target.value as TaskRole })}
+                              className="w-full px-2.5 py-1.5 text-sm rounded bg-white/5 border border-white/10 text-white focus:outline-none focus:border-[#e2a04a]"
+                            >
+                              {ROLE_OPTIONS.map((opt) => (
+                                <option key={opt.value} value={opt.value} className="bg-[#0f0f1a]">
+                                  {opt.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="flex items-end gap-2">
+                            <button
+                              onClick={handleSaveEdit}
+                              className="flex items-center gap-1 px-3 py-1.5 rounded text-sm font-medium"
+                              style={{ backgroundColor: '#33b89a', color: '#fff' }}
+                            >
+                              <Check size={14} />
+                              保存
+                            </button>
+                            <button
+                              onClick={handleCancelEdit}
+                              className="flex items-center gap-1 px-3 py-1.5 rounded text-sm font-medium bg-white/5 text-gray-400 hover:bg-white/10 transition-colors"
+                            >
+                              <X size={14} />
+                              取消
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                }
+
                 return (
                   <div
                     key={task.id}
-                    className="relative flex items-start gap-4 group cursor-pointer py-3 px-2 -mx-2 rounded-lg hover:bg-white/5 transition-colors print:hover:bg-transparent"
-                    onClick={() => handleCycleStatus(task.id, task.status)}
+                    className="relative flex items-start gap-4 group py-3 px-2 -mx-2 rounded-lg hover:bg-white/5 transition-colors print:hover:bg-transparent"
                   >
-                    <div
-                      className={`relative z-10 mt-0.5 flex items-center justify-center w-[23px] h-[23px] rounded-full border-2 bg-[#0f0f1a] print:bg-white ${STATUS_CIRCLE_RING[task.status]}`}
+                    <button
+                      onClick={() => handleCycleStatus(task.id, task.status)}
+                      className="relative z-10 mt-0.5 flex items-center justify-center w-[23px] h-[23px] rounded-full border-2 bg-[#0f0f1a] print:bg-white focus:outline-none print:cursor-default"
+                      style={{ borderColor: task.status === 'pending' ? '#4b5563' : task.status === 'in_progress' ? '#e2a04a' : '#33b89a' }}
                     >
                       <Icon
                         size={12}
                         className={`${STATUS_COLOR[task.status]} ${task.status === 'in_progress' ? 'animate-spin' : ''}`}
                       />
-                    </div>
+                    </button>
 
                     <div className="flex-1 min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
@@ -216,31 +435,199 @@ export default function Checklist() {
                         </span>
                       </div>
                     </div>
+
+                    <div className="print:hidden flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={() => handleStartEdit(task)}
+                        className="p-1.5 rounded text-gray-400 hover:text-[#e2a04a] hover:bg-white/5 transition-colors"
+                        title="编辑"
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      <button
+                        onClick={() => handleDeleteTask(task.id)}
+                        className="p-1.5 rounded text-gray-400 hover:text-[#c84b31] hover:bg-white/5 transition-colors"
+                        title="删除"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
                   </div>
                 )
               })}
+
+              {isAddingNew && (
+                <div className="relative flex items-start gap-4 py-3 px-2 -mx-2 rounded-lg bg-[#e2a04a]/10 border border-[#e2a04a]/20">
+                  <div className="relative z-10 mt-0.5 flex items-center justify-center w-[23px] h-[23px] rounded-full border-2 border-dashed border-[#e2a04a]/50 bg-[#0f0f1a]">
+                    <Plus size={12} className="text-[#e2a04a]" />
+                  </div>
+
+                  <div className="flex-1 min-w-0 space-y-3">
+                    <div className="flex flex-wrap gap-3">
+                      <div className="flex-1 min-w-[100px] max-w-[140px]">
+                        <label className="text-[11px] text-gray-500 block mb-1">时间</label>
+                        <input
+                          type="text"
+                          value={newTaskForm.time}
+                          onChange={(e) => setNewTaskForm({ ...newTaskForm, time: e.target.value })}
+                          className="w-full px-2.5 py-1.5 text-sm rounded bg-white/5 border border-white/10 text-white focus:outline-none focus:border-[#e2a04a]"
+                          placeholder="HH:MM"
+                        />
+                      </div>
+                      <div className="flex-1 min-w-[200px]">
+                        <label className="text-[11px] text-gray-500 block mb-1">任务内容</label>
+                        <input
+                          type="text"
+                          value={newTaskForm.task}
+                          onChange={(e) => setNewTaskForm({ ...newTaskForm, task: e.target.value })}
+                          className="w-full px-2.5 py-1.5 text-sm rounded bg-white/5 border border-white/10 text-white focus:outline-none focus:border-[#e2a04a]"
+                          placeholder="任务内容"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-3">
+                      <div className="flex-1 min-w-[120px]">
+                        <label className="text-[11px] text-gray-500 block mb-1">负责人</label>
+                        <input
+                          type="text"
+                          value={newTaskForm.assignee}
+                          onChange={(e) => setNewTaskForm({ ...newTaskForm, assignee: e.target.value })}
+                          className="w-full px-2.5 py-1.5 text-sm rounded bg-white/5 border border-white/10 text-white focus:outline-none focus:border-[#e2a04a]"
+                          placeholder="负责人姓名"
+                        />
+                      </div>
+                      <div className="flex-1 min-w-[100px] max-w-[140px]">
+                        <label className="text-[11px] text-gray-500 block mb-1">角色</label>
+                        <select
+                          value={newTaskForm.role}
+                          onChange={(e) => setNewTaskForm({ ...newTaskForm, role: e.target.value as TaskRole })}
+                          className="w-full px-2.5 py-1.5 text-sm rounded bg-white/5 border border-white/10 text-white focus:outline-none focus:border-[#e2a04a]"
+                        >
+                          {ROLE_OPTIONS.map((opt) => (
+                            <option key={opt.value} value={opt.value} className="bg-[#0f0f1a]">
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="flex items-end gap-2">
+                        <button
+                          onClick={handleSaveNew}
+                          disabled={!newTaskForm.task.trim()}
+                          className="flex items-center gap-1 px-3 py-1.5 rounded text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                          style={{ backgroundColor: '#e2a04a', color: '#0f0f1a' }}
+                        >
+                          <Plus size={14} />
+                          添加
+                        </button>
+                        <button
+                          onClick={handleCancelAdd}
+                          className="flex items-center gap-1 px-3 py-1.5 rounded text-sm font-medium bg-white/5 text-gray-400 hover:bg-white/10 transition-colors"
+                        >
+                          <X size={14} />
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
+
+            {!isAddingNew && (
+              <div className="print:hidden mt-4 ml-[11px] pl-6">
+                <button
+                  onClick={handleStartAdd}
+                  className="flex items-center gap-2 text-sm text-[#e2a04a] hover:text-[#e2a04a]/80 transition-colors"
+                >
+                  <Plus size={16} />
+                  新增任务
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {checklist && checklist.tasks.length === 0 && !isAddingNew && (
+          <div className="text-center py-12">
+            <div className="text-gray-500 text-sm mb-4">暂无任务</div>
+            <button
+              onClick={handleStartAdd}
+              className="print:hidden flex items-center gap-2 mx-auto text-sm text-[#e2a04a] hover:text-[#e2a04a]/80 transition-colors"
+            >
+              <Plus size={16} />
+              新增任务
+            </button>
           </div>
         )}
       </main>
 
       <div className="print:hidden shrink-0 border-t border-white/10 px-6 py-4 flex items-center justify-between">
-        <button
-          onClick={() => window.print()}
-          className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium bg-white/5 text-gray-300 hover:bg-white/10 transition-colors"
-        >
-          <Printer size={16} />
-          打印清单
-        </button>
-        <button
-          onClick={() => navigate('/inquiry')}
-          className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium"
-          style={{ backgroundColor: '#e2a04a', color: '#0f0f1a' }}
-        >
-          <Plus size={16} />
-          新建询价
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => window.print()}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium bg-white/5 text-gray-300 hover:bg-white/10 transition-colors"
+          >
+            <Printer size={16} />
+            打印清单
+          </button>
+          <button
+            onClick={() => setShowRegenerateConfirm(true)}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium bg-white/5 text-gray-300 hover:bg-white/10 transition-colors"
+          >
+            <RefreshCw size={16} />
+            重新生成清单
+          </button>
+        </div>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleGoToQuotation}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium bg-white/5 text-gray-300 hover:bg-white/10 transition-colors"
+          >
+            <ArrowLeft size={16} />
+            返回报价页
+          </button>
+          <button
+            onClick={() => navigate('/inquiry')}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium"
+            style={{ backgroundColor: '#e2a04a', color: '#0f0f1a' }}
+          >
+            <Plus size={16} />
+            新建询价
+          </button>
+        </div>
       </div>
+
+      {showRegenerateConfirm && (
+        <div className="print:hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-[#1a1a2e] rounded-xl p-6 w-full max-w-md mx-4 border border-white/10">
+            <h3
+              className="text-lg font-bold text-white mb-2"
+              style={{ fontFamily: "'ZCOOL QingKe HuangYou', cursive" }}
+            >
+              确认重新生成
+            </h3>
+            <p className="text-gray-400 text-sm mb-6">
+              重新生成清单将覆盖所有自定义修改，恢复为系统自动生成的模板。此操作不可撤销。
+            </p>
+            <div className="flex items-center justify-end gap-3">
+              <button
+                onClick={() => setShowRegenerateConfirm(false)}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-white/5 text-gray-300 hover:bg-white/10 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleRegenerate}
+                className="px-4 py-2 rounded-lg text-sm font-medium"
+                style={{ backgroundColor: '#c84b31', color: '#fff' }}
+              >
+                确认重新生成
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
